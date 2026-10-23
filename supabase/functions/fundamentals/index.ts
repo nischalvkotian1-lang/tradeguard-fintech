@@ -174,14 +174,23 @@ Deno.serve(async (req: Request) => {
     }
 
     const totalDebt = num(financialData.totalDebt);
-    const totalEquity = num(financialData.totalStockholderEquity) ?? num(keyStats.bookValue);
+    let totalEquity = num(financialData.totalStockholderEquity);
+    if (totalEquity == null && num(keyStats.bookValue) != null) {
+      const sharesOut = num(priceObj?.sharesOutstanding) ?? num(keyStats?.sharesOutstanding) ?? num(chartMeta?.sharesOutstanding);
+      if (sharesOut != null && sharesOut > 0) {
+        totalEquity = num(keyStats.bookValue)! * sharesOut;
+      }
+    }
 
     let debtToEquity: number | null = null;
-    if (totalDebt != null && totalEquity != null && totalEquity !== 0) {
-      debtToEquity = totalDebt / totalEquity;
-    } else {
-      const deRaw = num(financialData.debtToEquity);
-      if (deRaw != null) debtToEquity = deRaw / 100;
+    const deDirect = num(financialData.debtToEquity);
+    if (deDirect != null) {
+      debtToEquity = Number((deDirect / 100).toFixed(2));
+    } else if (totalDebt != null && totalEquity != null && totalEquity > 0) {
+      debtToEquity = Number((totalDebt / totalEquity).toFixed(2));
+    }
+    if (debtToEquity != null && (debtToEquity > 50 || debtToEquity < 0)) {
+      debtToEquity = Math.min(Math.max(debtToEquity, 0), 10);
     }
 
     let institutionalOwnershipPct: number | null = null;

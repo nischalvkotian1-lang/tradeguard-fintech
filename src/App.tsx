@@ -23,19 +23,30 @@ import {
   Stethoscope,
   Loader2,
   AlertCircle,
+  Sparkles,
+  Info,
 } from 'lucide-react';
+import SearchCard from './components/SearchCard';
+import RiskPlanCard from './components/RiskPlanCard';
+import AgentCommitteeCard from './components/AgentCommitteeCard';
+import FinancialMentorWidget from './components/FinancialMentorWidget';
+import { RiskSettingsCard, RiskLevel } from './components/RiskSettingsCard';
+import { calculateRiskPlan, RiskPlanResult, normalizeRiskTolerance } from './utils/riskEngine';
+import { runCommitteeOrchestration, StockContext } from './utils/committeeOrchestrator';
+import {
+  AgentPerspective,
+  DebateRebuttal,
+  CommitteeSynthesis,
+  CommitteeStage,
+  AgentRole,
+  CommitteeProgressUpdate,
+  MasterId,
+} from './types/agents';
 
 type Currency = 'INR';
-type PresetName = 'conservative' | 'moderate' | 'aggressive' | 'custom';
 
 const CURRENCY_META: Record<Currency, { symbol: string; label: string; locale: string }> = {
   INR: { symbol: '₹', label: 'INR', locale: 'en-IN' },
-};
-
-const PRESETS: Record<Exclude<PresetName, 'custom'>, { stopLossPct: number; rrRatio: number; label: string; desc: string }> = {
-  conservative: { stopLossPct: 3, rrRatio: 3, label: 'Conservative', desc: 'Best for volatile / swing trades' },
-  moderate: { stopLossPct: 5, rrRatio: 2, label: 'Moderate', desc: 'Balanced execution' },
-  aggressive: { stopLossPct: 8, rrRatio: 1.5, label: 'Aggressive', desc: 'Best for long-term / momentum trades' },
 };
 
 function formatMoney(value: number, currency: Currency) {
@@ -100,16 +111,6 @@ interface FundamentalData {
 
 type PriceFetchState = 'idle' | 'loading' | 'success' | 'error';
 
-type RiskTolerance = 'low' | 'medium' | 'high';
-
-const RISK_TOLERANCE_MAP: Record<RiskTolerance, PresetName> = {
-  low: 'conservative',
-  medium: 'moderate',
-  high: 'aggressive',
-};
-
-const BUDGET_PRESETS = [5000, 10000, 25000, 50000];
-
 // Built-in fallback dataset: top 30 NSE stocks. Values in rupees (1 Crore = 1e7).
 type CachedFundamental = Omit<FundamentalData, 'symbol' | 'notFound' | 'currentPrice' | 'companyName' | 'timestamp'>;
 const CACHED_FALLBACK: Record<string, CachedFundamental> = {
@@ -147,7 +148,7 @@ const CACHED_FALLBACK: Record<string, CachedFundamental> = {
 
 
 
-function scoreFundamentals(data: Pick<FundamentalData, 'marketCap' | 'netIncome' | 'debtToEquity' | 'institutionalOwnershipPct'>): FundamentalsHealth {
+function scoreFundamentals(data: Pick<FundamentalData, 'marketCap' | 'netIncome' | 'debtToEquity' | 'institutionalOwnershipPct'> & { symbol?: string }): FundamentalsHealth {
   const checks: HealthCheck[] = [];
 
   // Market Cap thresholds in rupees: Large Cap > ₹80,000 Cr (8e11), Mid Cap ₹20,000-80,000 Cr (2e11-8e11)
@@ -202,21 +203,50 @@ function scoreFundamentals(data: Pick<FundamentalData, 'marketCap' | 'netIncome'
 
 export default function App() {
   const [symbol, setSymbol] = useState('');
-  const [capitalRaw, setCapitalRaw] = useState('100000');
-  const [riskPctRaw, setRiskPctRaw] = useState('2');
+  const [capitalRaw, setCapitalRaw] = useState('');
   const currency: Currency = 'INR';
-  const [preset, setPreset] = useState<PresetName>('moderate');
-  const [customSlRaw, setCustomSlRaw] = useState('5');
-  const [customRrRaw, setCustomRrRaw] = useState('2');
-  const [riskTolerance, setRiskTolerance] = useState<RiskTolerance>('medium');
+  const [riskLevel, setRiskLevel] = useState<RiskLevel>('moderate');
+  const [stopLossPct, setStopLossPct] = useState<number>(6.0);
+  const [rrRatio, setRrRatio] = useState<number>(2.0);
 
-  const handleRiskTolerance = (rt: RiskTolerance) => {
-    setRiskTolerance(rt);
-    const mapped = RISK_TOLERANCE_MAP[rt];
-    setPreset(mapped);
-    setCustomSlRaw(String(PRESETS[mapped].stopLossPct));
-    setCustomRrRaw(String(PRESETS[mapped].rrRatio));
+  const handleSelectRiskLevel = (level: 'low' | 'moderate' | 'high') => {
+    setRiskLevel(level);
+    if (level === 'low') {
+      setStopLossPct(3.0);
+      setRrRatio(3.0);
+    } else if (level === 'moderate') {
+      setStopLossPct(6.0);
+      setRrRatio(2.0);
+    } else if (level === 'high') {
+      setStopLossPct(10.0);
+      setRrRatio(1.5);
+    }
   };
+
+  const handleStopLossChange = (val: number) => {
+    setStopLossPct(val);
+    if (Math.abs(val - 3.0) < 0.05) {
+      setRiskLevel('low');
+      setRrRatio(3.0);
+    } else if (Math.abs(val - 6.0) < 0.05) {
+      setRiskLevel('moderate');
+      setRrRatio(2.0);
+    } else if (Math.abs(val - 10.0) < 0.05) {
+      setRiskLevel('high');
+      setRrRatio(1.5);
+    } else {
+      setRiskLevel('custom');
+    }
+  };
+
+  const normalizedTolerance =
+    riskLevel === 'low'
+      ? 'Low'
+      : riskLevel === 'high'
+      ? 'High'
+      : riskLevel === 'custom'
+      ? 'Custom'
+      : 'Medium';
 
   // Live price state
   const [livePrice, setLivePrice] = useState<number | null>(null);
@@ -228,18 +258,46 @@ export default function App() {
 
   const price = livePrice ?? 0;
   const capital = parseInput(capitalRaw);
-  const riskPct = clamp(parseInput(riskPctRaw), 0, 100);
-
-  const stopLossPct = preset === 'custom' ? clamp(parseInput(customSlRaw), 0.1, 50) : PRESETS[preset].stopLossPct;
-  const rrRatio = preset === 'custom' ? clamp(parseInput(customRrRaw), 0.1, 20) : PRESETS[preset].rrRatio;
-
-  const hasValidInput = symbol.trim().length > 0 && price > 0 && capital > 0 && riskPct > 0;
   const sym = symbol.trim().toUpperCase();
+  const hasPrice = sym.length > 0 && price > 0;
+  const hasBudget = capital > 0;
+  const hasValidInput = hasPrice && hasBudget;
 
   const [healthState, setHealthState] = useState<HealthFetchState>('idle');
   const [health, setHealth] = useState<FundamentalsHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [healthSource, setHealthSource] = useState<string | null>(null);
+  const [rawFundamentals, setRawFundamentals] = useState<FundamentalData | null>(null);
+
+  // Phase 5: Multi-Agent Research Committee State
+  const [committeeStage, setCommitteeStage] = useState<CommitteeStage>('idle');
+  const [currentSpeakingAgent, setCurrentSpeakingAgent] = useState<AgentRole | null>(null);
+  const [committeeProgress, setCommitteeProgress] = useState(0);
+  const [committeeStatus, setCommitteeStatus] = useState('');
+  const [perspectives, setPerspectives] = useState<AgentPerspective[]>([]);
+  const [rebuttals, setRebuttals] = useState<DebateRebuttal[]>([]);
+  const [synthesis, setSynthesis] = useState<CommitteeSynthesis | null>(null);
+  const [selectedMasterIds, setSelectedMasterIds] = useState<MasterId[]>([
+    'graham',
+    'buffett',
+    'munger',
+    'jones',
+  ]);
+  const committeeAbortRef = useRef<AbortController | null>(null);
+
+  // Reset committee when stock symbol changes
+  useEffect(() => {
+    if (committeeAbortRef.current) {
+      committeeAbortRef.current.abort();
+    }
+    setCommitteeStage('idle');
+    setCurrentSpeakingAgent(null);
+    setCommitteeProgress(0);
+    setCommitteeStatus('');
+    setPerspectives([]);
+    setRebuttals([]);
+    setSynthesis(null);
+  }, [sym]);
 
   // Live price fetch — fires when symbol changes
   useEffect(() => {
@@ -324,6 +382,7 @@ export default function App() {
       setHealth(null);
       setHealthError(null);
       setHealthSource(null);
+      setRawFundamentals(null);
       return;
     }
 
@@ -335,10 +394,25 @@ export default function App() {
       const base = sym.replace(/\.(NS|BO|BSE)$/, '');
       const cached = CACHED_FALLBACK[base];
 
+      const makeCachedFundamental = (b: string, c: typeof CACHED_FALLBACK[string]): FundamentalData => ({
+        symbol: b,
+        companyName: liveCompany,
+        currentPrice: price,
+        marketCap: c.marketCap,
+        netIncome: c.netIncome,
+        totalDebt: c.totalDebt,
+        totalEquity: c.totalEquity,
+        debtToEquity: c.debtToEquity,
+        institutionalOwnershipPct: c.institutionalOwnershipPct,
+        source: 'Verified Cached Data',
+        timestamp: new Date().toISOString(),
+      });
+
       // 2.5s timeout — if the live fetch hasn't resolved, fall back to cached data
       const timeoutId = setTimeout(() => {
         if (cached) {
           setHealth(scoreFundamentals({ ...cached, symbol: base }));
+          setRawFundamentals(makeCachedFundamental(base, cached));
           setHealthSource('Verified Cached Data');
           setHealthState('fallback');
         }
@@ -362,12 +436,14 @@ export default function App() {
         if (data.notFound) {
           if (cached) {
             setHealth(scoreFundamentals({ ...cached, symbol: base }));
+            setRawFundamentals(makeCachedFundamental(base, cached));
             setHealthSource('Verified Cached Data');
             setHealthState('fallback');
           } else {
             setHealthState('manual');
             setHealth(null);
             setHealthSource(null);
+            setRawFundamentals(null);
           }
           return;
         }
@@ -377,6 +453,7 @@ export default function App() {
         }
 
         setHealth(scoreFundamentals(data));
+        setRawFundamentals(data);
         setHealthSource(data.source || 'Live NSE Feed');
         setHealthState('success');
       } catch (err) {
@@ -384,11 +461,13 @@ export default function App() {
         if (err instanceof DOMException && err.name === 'AbortError') return;
         if (cached) {
           setHealth(scoreFundamentals({ ...cached, symbol: base }));
+          setRawFundamentals(makeCachedFundamental(base, cached));
           setHealthSource('Verified Cached Data');
           setHealthState('fallback');
         } else {
           setHealthState('error');
           setHealthError(err instanceof Error ? err.message : 'Unknown error');
+          setRawFundamentals(null);
         }
       }
     }, 600);
@@ -400,18 +479,20 @@ export default function App() {
   }, [sym, price]);
 
   const isHighRisk = health?.isHighRisk ?? false;
-  const riskCap = isHighRisk ? 1.0 : 10;
-  const effectiveRiskPct = isHighRisk ? Math.min(riskPct, 1.0) : riskPct;
+
+  const riskPlan = useMemo(() => {
+    return calculateRiskPlan(price, capital, normalizedTolerance, stopLossPct);
+  }, [price, capital, normalizedTolerance, stopLossPct]);
 
   const calc = useMemo(() => {
     const slFrac = stopLossPct / 100;
-    const stopLoss = price * (1 - slFrac);
-    const riskPerShare = price - stopLoss;
+    const stopLoss = riskPlan.plannedStopLossPrice > 0 ? riskPlan.plannedStopLossPrice : (price > 0 ? price * (1 - slFrac) : 0);
+    const riskPerShare = price > stopLoss ? price - stopLoss : 0;
     const target = price + riskPerShare * rrRatio;
-    const maxRiskAmount = (capital * effectiveRiskPct) / 100;
-    const positionSize = riskPerShare > 0 ? Math.floor(maxRiskAmount / riskPerShare) : 0;
-    const positionValue = positionSize * price;
-    const actualRisk = positionSize * riskPerShare;
+    const maxRiskAmount = riskPlan.maxPlannedLoss;
+    const positionSize = riskPlan.recommendedShares;
+    const positionValue = riskPlan.capitalAllocated;
+    const actualRisk = riskPlan.maxPlannedLoss;
     const potentialProfit = positionSize * (target - price);
     const capitalAtRiskPct = capital > 0 ? (actualRisk / capital) * 100 : 0;
     const capitalDeployedPct = capital > 0 ? (positionValue / capital) * 100 : 0;
@@ -428,7 +509,7 @@ export default function App() {
       capitalAtRiskPct,
       capitalDeployedPct,
     };
-  }, [price, capital, effectiveRiskPct, stopLossPct, rrRatio]);
+  }, [price, capital, stopLossPct, rrRatio, riskPlan]);
 
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -436,20 +517,27 @@ export default function App() {
   const buildExecutionPlan = useCallback(() => {
     const line = '------------------------------------------';
     const targetPct = stopLossPct * rrRatio;
+    const slFormatted = (riskPlan.stopLossPct * 100) % 1 === 0
+      ? (riskPlan.stopLossPct * 100).toFixed(0)
+      : (riskPlan.stopLossPct * 100).toFixed(1);
     return [
       line,
       `🎯 TRADEGUARD EXECUTION PLAN: ${sym || 'UNKNOWN'}`,
-      `• Action: BUY ${formatNumber(calc.positionSize)} Shares`,
+      `• Action: BUY ${formatNumber(riskPlan.recommendedShares)} Whole Shares`,
       `• Entry Price: ${formatMoney(price, currency)}`,
-      `• Stop Loss: ${formatMoney(calc.stopLoss, currency)} (${stopLossPct.toFixed(1)}%)`,
+      `• Planned Stop Loss: ${formatMoney(riskPlan.plannedStopLossPrice || calc.stopLoss, currency)} (-${slFormatted}%)`,
       `• Take Profit Target: ${formatMoney(calc.target, currency)} (+${targetPct.toFixed(1)}%)`,
       `• Risk : Reward = 1 : ${formatRatio(rrRatio)}`,
-      `• Max Risk: ${formatMoney(calc.actualRisk, currency)} | Potential Profit: ${formatMoney(calc.potentialProfit, currency)}`,
+      `• Capital Allocated: ${capital > 0 ? `${formatMoney(riskPlan.capitalAllocated, currency)} (${riskPlan.capitalAllocatedPct}%)` : `${CURRENCY_META[currency].symbol}0 (—)`}`,
+      `• Cash Buffer: ${capital > 0 ? `${formatMoney(riskPlan.unallocatedBuffer, currency)} (${riskPlan.unallocatedBufferPct}%)` : `${CURRENCY_META[currency].symbol}0 (—)`}`,
+      `• Max Planned Loss at Risk: ${capital > 0 ? formatMoney(riskPlan.maxPlannedLoss, currency) : `${CURRENCY_META[currency].symbol}0`}`,
+      `• Disclaimer: Planned stop-loss trigger. Execution price depends on market liquidity and order matching.`,
       line,
     ].join('\n');
-  }, [sym, calc, price, currency, stopLossPct, rrRatio]);
+  }, [sym, calc, riskPlan, price, currency, stopLossPct, rrRatio, capital]);
 
   const handleCopy = useCallback(async () => {
+    if (capital <= 0) return;
     const text = buildExecutionPlan();
     try {
       await navigator.clipboard.writeText(text);
@@ -468,6 +556,71 @@ export default function App() {
     copyTimer.current = setTimeout(() => setCopied(false), 2000);
   }, [buildExecutionPlan]);
 
+  const baseSym = sym.replace(/\.(NS|BO|BSE)$/, '');
+  const cachedMeta = CACHED_FALLBACK[baseSym];
+
+  const rawDE = rawFundamentals?.debtToEquity ?? cachedMeta?.debtToEquity ?? null;
+  const sanitizedDE = (rawDE != null && (rawDE > 25 || rawDE < 0)) ? (rawDE > 25 ? 2.50 : 0.50) : rawDE;
+
+  const stockContext: StockContext = useMemo(() => ({
+    symbol: sym || 'UNKNOWN',
+    companyName: liveCompany || sym || 'Unknown Stock',
+    currentPrice: price,
+    marketCap: rawFundamentals?.marketCap ?? cachedMeta?.marketCap ?? null,
+    netIncome: rawFundamentals?.netIncome ?? cachedMeta?.netIncome ?? null,
+    totalDebt: rawFundamentals?.totalDebt ?? cachedMeta?.totalDebt ?? null,
+    totalEquity: rawFundamentals?.totalEquity ?? cachedMeta?.totalEquity ?? null,
+    debtToEquity: sanitizedDE,
+    institutionalOwnershipPct: rawFundamentals?.institutionalOwnershipPct ?? cachedMeta?.institutionalOwnershipPct ?? null,
+    source: rawFundamentals?.source ?? priceSource ?? 'Verified Market Feed',
+  }), [sym, liveCompany, price, rawFundamentals, cachedMeta, sanitizedDE, priceSource]);
+
+  const handleConveneCommittee = useCallback(async () => {
+    if (price <= 0 || capital <= 0) return;
+
+    if (committeeAbortRef.current) {
+      committeeAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    committeeAbortRef.current = controller;
+
+    setCommitteeStage('independent_analysis');
+    setCommitteeProgress(5);
+    setCommitteeStatus(`Convening Research Committee for ${sym || 'stock'}...`);
+    setPerspectives([]);
+    setRebuttals([]);
+    setSynthesis(null);
+
+    try {
+      await runCommitteeOrchestration(
+        stockContext,
+        riskPlan,
+        (update: CommitteeProgressUpdate) => {
+          setCommitteeStage(update.stage);
+          setCurrentSpeakingAgent(update.currentSpeakingAgent);
+          setCommitteeProgress(update.progressPct);
+          setCommitteeStatus(update.statusMessage);
+
+          if (update.perspectiveUpdate) {
+            setPerspectives((prev) => [...prev, update.perspectiveUpdate!]);
+          }
+          if (update.rebuttalUpdate) {
+            setRebuttals((prev) => [...prev, update.rebuttalUpdate!]);
+          }
+          if (update.synthesisUpdate) {
+            setSynthesis(update.synthesisUpdate);
+          }
+        },
+        controller.signal,
+        selectedMasterIds
+      );
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      setCommitteeStage('error');
+      setCommitteeStatus('Committee deliberation interrupted.');
+    }
+  }, [price, capital, sym, stockContext, riskPlan, selectedMasterIds]);
+
   return (
     <div className="min-h-screen bg-navy-950 text-slate-100 grid-bg">
       <DisclaimerBanner />
@@ -477,65 +630,87 @@ export default function App() {
 
         <section className="mt-8 grid gap-6 lg:grid-cols-5">
           <div className="lg:col-span-2 space-y-6">
-            <SearchCard
-              symbol={symbol}
-              setSymbol={setSymbol}
-              currency={currency}
-              priceFetchState={priceFetchState}
-              livePrice={livePrice}
-              liveCompany={liveCompany}
-              priceSource={priceSource}
-              priceTimestamp={priceTimestamp}
-              priceError={priceError}
-            />
-            <FundamentalSafetyCard
-              health={health}
-              symbol={sym}
-              fetchState={healthState}
-              error={healthError}
-              source={healthSource}
-            />
-            <RiskSettingsCard
-              capitalRaw={capitalRaw}
-              setCapitalRaw={setCapitalRaw}
-              riskPctRaw={riskPctRaw}
-              setRiskPctRaw={setRiskPctRaw}
-              currency={currency}
-              preset={preset}
-              setPreset={setPreset}
-              customSlRaw={customSlRaw}
-              setCustomSlRaw={setCustomSlRaw}
-              customRrRaw={customRrRaw}
-              setCustomRrRaw={setCustomRrRaw}
-              stopLossPct={stopLossPct}
-              rrRatio={rrRatio}
-              riskCap={riskCap}
-              isHighRisk={isHighRisk}
-              effectiveRiskPct={effectiveRiskPct}
-              riskTolerance={riskTolerance}
-              onRiskToleranceChange={handleRiskTolerance}
-            />
+            <div className="relative z-30">
+              <SearchCard
+                symbol={symbol}
+                setSymbol={setSymbol}
+                currency={currency}
+                priceFetchState={priceFetchState}
+                livePrice={livePrice}
+                liveCompany={liveCompany}
+                priceSource={priceSource}
+                priceTimestamp={priceTimestamp}
+                priceError={priceError}
+              />
+            </div>
+            <div className="relative z-10">
+              <RiskSettingsCard
+                capitalRaw={capitalRaw}
+                setCapitalRaw={setCapitalRaw}
+                currency={CURRENCY_META[currency].symbol}
+                riskLevel={riskLevel}
+                onSelectRiskLevel={handleSelectRiskLevel}
+                stopLossPct={stopLossPct}
+                onStopLossChange={handleStopLossChange}
+                livePrice={price}
+              />
+            </div>
+            <div className="relative z-0">
+              <FundamentalSafetyCard
+                health={health}
+                symbol={sym}
+                fetchState={healthState}
+                error={healthError}
+                source={healthSource}
+              />
+            </div>
           </div>
 
           <div className="lg:col-span-3 space-y-6">
+            <RiskPlanCard
+              currentPrice={price}
+              budget={capital}
+              riskTolerance={normalizedTolerance}
+              currency={CURRENCY_META[currency].symbol}
+              symbol={sym}
+              plan={riskPlan}
+            />
             <TradeBar
               stopLoss={calc.stopLoss}
               current={price}
               target={calc.target}
               currency={currency}
-              active={hasValidInput}
+              active={hasPrice}
               stopLossPct={stopLossPct}
               rrRatio={rrRatio}
             />
             <ResultsGrid
               calc={calc}
+              riskPlan={riskPlan}
               currency={currency}
-              riskPct={effectiveRiskPct}
-              active={hasValidInput}
+              riskPct={calc.capitalAtRiskPct}
+              active={hasPrice}
+              hasBudget={hasBudget}
               symbol={sym}
               rrRatio={rrRatio}
               onCopy={handleCopy}
               copied={copied}
+              onConvene={handleConveneCommittee}
+              isCommitteeRunning={committeeStage === 'independent_analysis' || committeeStage === 'cross_examination' || committeeStage === 'synthesis_veto'}
+            />
+            <AgentCommitteeCard
+              stock={stockContext}
+              riskPlan={riskPlan}
+              stage={committeeStage}
+              currentSpeakingAgent={currentSpeakingAgent}
+              progressPct={committeeProgress}
+              statusMessage={committeeStatus}
+              round1Perspectives={perspectives}
+              round2Rebuttals={rebuttals}
+              round3Synthesis={synthesis}
+              onConvene={handleConveneCommittee}
+              selectedMasterIds={selectedMasterIds}
+              onSelectMasterIds={setSelectedMasterIds}
             />
             <CopyToast visible={copied} />
           </div>
@@ -543,6 +718,9 @@ export default function App() {
 
         <Footer />
       </main>
+
+      {/* Floating Financial Mentor AI Assistant (Bottom-Left) */}
+      <FinancialMentorWidget currentStock={stockContext} />
     </div>
   );
 }
@@ -602,390 +780,6 @@ function CardLabel({ icon: Icon, title, subtitle }: { icon: React.ElementType; t
         <h2 className="text-sm font-semibold text-white">{title}</h2>
         <p className="text-[11px] text-slate-500">{subtitle}</p>
       </div>
-    </div>
-  );
-}
-
-function SearchCard({
-  symbol,
-  setSymbol,
-  currency,
-  priceFetchState,
-  livePrice,
-  liveCompany,
-  priceSource,
-  priceTimestamp,
-  priceError,
-}: {
-  symbol: string;
-  setSymbol: (v: string) => void;
-  currency: Currency;
-  priceFetchState: PriceFetchState;
-  livePrice: number | null;
-  liveCompany: string | null;
-  priceSource: string | null;
-  priceTimestamp: string | null;
-  priceError: string | null;
-}) {
-  const isLive = priceFetchState === 'success' && priceSource && !priceSource.includes('Cached');
-  const isCached = priceFetchState === 'success' && priceSource && priceSource.includes('Cached');
-
-  return (
-    <Card>
-      <CardLabel icon={Search} title="Stock Setup" subtitle="Enter NSE/BSE symbol to fetch live market data" />
-      <div className="space-y-4">
-        <div>
-          <label className="mb-1.5 block text-xs font-medium text-slate-400">NSE / BSE Stock Symbol</label>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            <input
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
-              placeholder="e.g. RELIANCE, TATAMOTORS, INFY"
-              className="w-full rounded-lg border border-white/10 bg-navy-850 py-2.5 pl-10 pr-4 font-mono text-sm font-semibold uppercase tracking-wider text-white placeholder:font-sans placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-600 focus:border-cyan-400/50 focus:outline-none focus:ring-2 focus:ring-cyan-400/20"
-            />
-          </div>
-        </div>
-
-        {priceFetchState === 'loading' && (
-          <div className="flex items-center gap-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-4">
-            <Loader2 className="h-5 w-5 animate-spin text-cyan-400" />
-            <div>
-              <p className="text-sm font-medium text-cyan-200">Fetching live NSE price...</p>
-              <p className="text-[11px] text-slate-500">Querying Yahoo Finance for {symbol.trim().toUpperCase() || '...'}</p>
-            </div>
-          </div>
-        )}
-
-        {priceFetchState === 'success' && livePrice != null && (
-          <div className="rounded-lg border border-white/10 bg-navy-850 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-bold text-white">{liveCompany || symbol.trim().toUpperCase()}</p>
-                <p className="font-mono text-[10px] text-slate-500">{symbol.trim().toUpperCase()}.NS</p>
-              </div>
-              <span
-                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${
-                  isLive
-                    ? 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30'
-                    : 'bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30'
-                }`}
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${isLive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                {isLive ? 'Live NSE Feed' : 'Verified Cached Data'}
-              </span>
-            </div>
-            <div className="flex items-baseline gap-2">
-              <span className="font-mono text-2xl font-bold text-cyan-300 text-glow-cyan">
-                {formatMoney(livePrice, currency)}
-              </span>
-              <span className="text-[11px] text-slate-500">per share</span>
-            </div>
-            {priceTimestamp && (
-              <p className="mt-2 text-[10px] text-slate-600">
-                Updated: {new Date(priceTimestamp).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
-              </p>
-            )}
-          </div>
-        )}
-
-        {priceFetchState === 'error' && (
-          <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-            <div>
-              <p className="text-sm font-semibold text-amber-200">Could not fetch live price</p>
-              <p className="text-[11px] leading-relaxed text-amber-200/70">
-                {priceError || 'Unknown error'}. Check the symbol and try again.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {priceFetchState === 'idle' && (
-          <div className="flex items-center gap-3 rounded-lg border border-white/5 bg-navy-850/50 p-4">
-            <TrendingUp className="h-4 w-4 text-slate-600" />
-            <p className="text-xs text-slate-500">Enter a stock symbol above to auto-fetch the live market price</p>
-          </div>
-        )}
-      </div>
-    </Card>
-  );
-}
-
-function RiskSettingsCard({
-  capitalRaw,
-  setCapitalRaw,
-  riskPctRaw,
-  setRiskPctRaw,
-  currency,
-  preset,
-  setPreset,
-  customSlRaw,
-  setCustomSlRaw,
-  customRrRaw,
-  setCustomRrRaw,
-  stopLossPct,
-  rrRatio,
-  riskCap,
-  isHighRisk,
-  effectiveRiskPct,
-  riskTolerance,
-  onRiskToleranceChange,
-}: {
-  capitalRaw: string;
-  setCapitalRaw: (v: string) => void;
-  riskPctRaw: string;
-  setRiskPctRaw: (v: string) => void;
-  currency: Currency;
-  preset: PresetName;
-  setPreset: (p: PresetName) => void;
-  customSlRaw: string;
-  setCustomSlRaw: (v: string) => void;
-  customRrRaw: string;
-  setCustomRrRaw: (v: string) => void;
-  stopLossPct: number;
-  rrRatio: number;
-  riskCap: number;
-  isHighRisk: boolean;
-  effectiveRiskPct: number;
-  riskTolerance: RiskTolerance;
-  onRiskToleranceChange: (rt: RiskTolerance) => void;
-}) {
-  const currentBudget = parseInput(capitalRaw);
-
-  const toleranceOptions: { key: RiskTolerance; label: string; desc: string }[] = [
-    { key: 'low', label: 'Low', desc: 'Capital preservation' },
-    { key: 'medium', label: 'Medium', desc: 'Balanced' },
-    { key: 'high', label: 'High', desc: 'Aggressive / wider stops' },
-  ];
-
-  return (
-    <Card>
-      <CardLabel icon={Lock} title="Risk Settings" subtitle="Define your budget and risk tolerance" />
-      <div className="space-y-5">
-        <div>
-          <label className="mb-1.5 block text-xs font-medium text-slate-400">Total Budget ({CURRENCY_META[currency].symbol})</label>
-          <div className="relative">
-            <Wallet className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 font-mono text-sm font-semibold text-slate-500">
-              {CURRENCY_META[currency].symbol}
-            </span>
-            <input
-              value={capitalRaw}
-              onChange={(e) => setCapitalRaw(e.target.value)}
-              inputMode="numeric"
-              className="w-full rounded-lg border border-white/10 bg-navy-850 py-2.5 pl-12 pr-4 font-mono text-sm font-semibold text-white focus:border-cyan-400/50 focus:outline-none focus:ring-2 focus:ring-cyan-400/20"
-            />
-          </div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {BUDGET_PRESETS.map((amt) => {
-              const active = currentBudget === amt;
-              return (
-                <button
-                  key={amt}
-                  onClick={() => setCapitalRaw(String(amt))}
-                  className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
-                    active
-                      ? 'border-cyan-400/60 bg-cyan-400/10 text-cyan-200 glow-cyan'
-                      : 'border-white/10 bg-navy-850 text-slate-400 hover:border-white/20 hover:bg-navy-800 hover:text-slate-200'
-                  }`}
-                >
-                  {CURRENCY_META[currency].symbol}{formatNumber(amt)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div>
-          <label className="mb-2 block text-xs font-medium text-slate-400">Risk Tolerance</label>
-          <div className="grid grid-cols-3 gap-2">
-            {toleranceOptions.map((opt) => {
-              const active = riskTolerance === opt.key;
-              return (
-                <button
-                  key={opt.key}
-                  onClick={() => onRiskToleranceChange(opt.key)}
-                  className={`rounded-lg border p-2.5 text-center transition ${
-                    active
-                      ? 'border-cyan-400/60 bg-cyan-400/10 glow-cyan'
-                      : 'border-white/10 bg-navy-850 hover:border-white/20 hover:bg-navy-800'
-                  }`}
-                >
-                  <span className={`block text-xs font-bold ${active ? 'text-cyan-200' : 'text-slate-300'}`}>
-                    {opt.label}
-                  </span>
-                  <span className="mt-0.5 block text-[9px] leading-tight text-slate-500">{opt.desc}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <label className="text-xs font-medium text-slate-400">Max Risk % per Trade</label>
-            <span className={`font-mono text-xs font-semibold ${isHighRisk ? 'text-amber-400' : 'text-cyan-300'}`}>
-              {effectiveRiskPct.toFixed(1)}%
-            </span>
-          </div>
-          <div className="relative">
-            <Percent className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            <input
-              value={riskPctRaw}
-              onChange={(e) => setRiskPctRaw(e.target.value)}
-              inputMode="decimal"
-              className="w-full rounded-lg border border-white/10 bg-navy-850 py-2.5 pl-10 pr-4 font-mono text-sm font-semibold text-white focus:border-cyan-400/50 focus:outline-none focus:ring-2 focus:ring-cyan-400/20"
-            />
-          </div>
-          <input
-            type="range"
-            min={0.5}
-            max={riskCap}
-            step={isHighRisk ? 0.1 : 0.5}
-            value={clamp(effectiveRiskPct, 0.5, riskCap) || 0.5}
-            onChange={(e) => setRiskPctRaw(e.target.value)}
-            className={`mt-3 w-full ${isHighRisk ? 'accent-amber-400' : 'accent-cyan-400'}`}
-          />
-          <div className="mt-1 flex justify-between text-[10px] text-slate-600">
-            <span>0.5%</span>
-            <span>{isHighRisk ? 'Capped' : 'Conservative'}</span>
-            <span>{riskCap.toFixed(1)}%</span>
-          </div>
-          {isHighRisk && (
-            <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5">
-              <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
-              <p className="text-[11px] leading-relaxed text-amber-200/90">
-                TradeGuard capped your risk to 1% to protect your account from speculative stock losses.
-              </p>
-            </div>
-          )}
-        </div>
-
-        <StrategyPresets
-          preset={preset}
-          setPreset={setPreset}
-          customSlRaw={customSlRaw}
-          setCustomSlRaw={setCustomSlRaw}
-          customRrRaw={customRrRaw}
-          setCustomRrRaw={setCustomRrRaw}
-          stopLossPct={stopLossPct}
-          rrRatio={rrRatio}
-        />
-      </div>
-    </Card>
-  );
-}
-
-function StrategyPresets({
-  preset,
-  setPreset,
-  customSlRaw,
-  setCustomSlRaw,
-  customRrRaw,
-  setCustomRrRaw,
-  stopLossPct,
-  rrRatio,
-}: {
-  preset: PresetName;
-  setPreset: (p: PresetName) => void;
-  customSlRaw: string;
-  setCustomSlRaw: (v: string) => void;
-  customRrRaw: string;
-  setCustomRrRaw: (v: string) => void;
-  stopLossPct: number;
-  rrRatio: number;
-}) {
-  const presetEntries = Object.entries(PRESETS) as [Exclude<PresetName, 'custom'>, (typeof PRESETS)[keyof typeof PRESETS]][];
-
-  return (
-    <div>
-      <div className="mb-2.5 flex items-center gap-2">
-        <Sliders className="h-3.5 w-3.5 text-cyan-300" />
-        <label className="text-xs font-medium text-slate-400">Risk Strategy Presets</label>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        {presetEntries.map(([key, p]) => {
-          const active = preset === key;
-          return (
-            <button
-              key={key}
-              onClick={() => {
-                setPreset(key);
-                setCustomSlRaw(String(p.stopLossPct));
-                setCustomRrRaw(String(p.rrRatio));
-              }}
-              className={`group rounded-lg border p-2.5 text-left transition ${
-                active
-                  ? 'border-cyan-400/60 bg-cyan-400/10 glow-cyan'
-                  : 'border-white/10 bg-navy-850 hover:border-white/20 hover:bg-navy-800'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className={`text-xs font-semibold ${active ? 'text-cyan-200' : 'text-slate-300'}`}>
-                  {p.label}
-                </span>
-                {active && <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse-soft" />}
-              </div>
-              <div className="mt-1 font-mono text-[11px] text-slate-400">
-                {p.stopLossPct}% SL · 1:{formatRatio(p.rrRatio)} R:R
-              </div>
-            </button>
-          );
-        })}
-
-        <button
-          onClick={() => setPreset('custom')}
-          className={`col-span-2 rounded-lg border p-2.5 text-left transition ${
-            preset === 'custom'
-              ? 'border-cyan-400/60 bg-cyan-400/10 glow-cyan'
-              : 'border-white/10 bg-navy-850 hover:border-white/20 hover:bg-navy-800'
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-xs font-semibold ${preset === 'custom' ? 'text-cyan-200' : 'text-slate-300'}`}>
-              Custom
-            </span>
-            {preset === 'custom' && <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse-soft" />}
-          </div>
-          {preset !== 'custom' ? (
-            <div className="mt-1 font-mono text-[11px] text-slate-400">Set your own stop-loss & R:R ratio</div>
-          ) : (
-            <div className="mt-2.5 grid grid-cols-2 gap-2">
-              <div>
-                <label className="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">Stop-Loss %</label>
-                <div className="relative">
-                  <input
-                    value={customSlRaw}
-                    onChange={(e) => setCustomSlRaw(e.target.value)}
-                    inputMode="decimal"
-                    className="w-full rounded-md border border-white/10 bg-navy-900 py-1.5 pl-2.5 pr-5 font-mono text-xs font-semibold text-white focus:border-cyan-400/50 focus:outline-none focus:ring-1 focus:ring-cyan-400/20"
-                  />
-                  <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-slate-500">%</span>
-                </div>
-              </div>
-              <div>
-                <label className="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">Target R:R</label>
-                <div className="relative">
-                  <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-slate-500">1:</span>
-                  <input
-                    value={customRrRaw}
-                    onChange={(e) => setCustomRrRaw(e.target.value)}
-                    inputMode="decimal"
-                    className="w-full rounded-md border border-white/10 bg-navy-900 py-1.5 pl-7 pr-2.5 font-mono text-xs font-semibold text-white focus:border-cyan-400/50 focus:outline-none focus:ring-1 focus:ring-cyan-400/20"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-        </button>
-      </div>
-
-      <p className="mt-2 text-[10px] leading-relaxed text-slate-600">
-        Active: <span className="font-semibold text-slate-400">{stopLossPct.toFixed(1)}% stop-loss</span> ·{' '}
-        <span className="font-semibold text-slate-400">1:{formatRatio(rrRatio)} risk-to-reward</span>
-      </p>
     </div>
   );
 }
@@ -1286,65 +1080,75 @@ function PriceTag({
 
 function ResultsGrid({
   calc,
+  riskPlan,
   currency,
   riskPct,
   active,
+  hasBudget,
   symbol,
   rrRatio,
   onCopy,
   copied,
+  onConvene,
+  isCommitteeRunning,
 }: {
   calc: {
     stopLoss: number; target: number; riskPerShare: number; maxRiskAmount: number;
     positionSize: number; positionValue: number; actualRisk: number;
     potentialProfit: number; capitalAtRiskPct: number; capitalDeployedPct: number;
   };
+  riskPlan?: RiskPlanResult;
   currency: Currency;
   riskPct: number;
   active: boolean;
+  hasBudget: boolean;
   symbol: string;
   rrRatio: number;
   onCopy: () => void;
   copied: boolean;
+  onConvene?: () => void;
+  isCommitteeRunning?: boolean;
 }) {
   if (!active) {
     return (
       <Card className="flex h-[280px] flex-col items-center justify-center text-center">
         <Crosshair className="mb-3 h-8 w-8 text-slate-700" />
-        <p className="text-sm text-slate-500">Calculations will appear here once you enter a valid setup</p>
+        <p className="text-sm text-slate-500">Calculations will appear here once you enter a valid stock setup</p>
       </Card>
     );
   }
+
+  const currSymbol = CURRENCY_META[currency].symbol;
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
         <StatCard
           icon={Layers}
-          label="Position Size"
-          value={formatNumber(calc.positionSize)}
-          unit="shares"
-          accent="cyan"
+          label="Recommended Position"
+          value={hasBudget ? formatNumber(calc.positionSize) : '0'}
+          unit="whole shares"
+          accent="green"
           highlight
         />
         <StatCard
           icon={Crosshair}
-          label="Max Risk Amount"
-          value={formatMoney(calc.maxRiskAmount, currency)}
-          unit={`@ ${riskPct.toFixed(1)}% of capital`}
+          label="Max Capital at Risk"
+          value={hasBudget ? formatMoney(calc.actualRisk, currency) : `${currSymbol}0`}
+          unit={hasBudget && riskPlan ? 'strictly capped' : hasBudget ? `@ ${riskPct.toFixed(1)}% of capital` : '—'}
           accent="red"
         />
         <StatCard
           icon={TrendingUp}
           label="Capital Deployed"
-          value={formatMoney(calc.positionValue, currency)}
-          unit={`${calc.capitalDeployedPct.toFixed(1)}% of capital`}
+          value={hasBudget ? formatMoney(calc.positionValue, currency) : `${currSymbol}0`}
+          unit={hasBudget ? `${calc.capitalDeployedPct.toFixed(1)}% of budget` : '—'}
           accent="blue"
         />
         <StatCard
           icon={Target}
           label="Potential Profit"
-          value={formatMoney(calc.potentialProfit, currency)}
+          value={hasBudget ? formatMoney(calc.potentialProfit, currency) : `${currSymbol}0`}
           unit={`at 1:${formatRatio(rrRatio)} target`}
           accent="green"
         />
@@ -1364,19 +1168,53 @@ function ResultsGrid({
           <SummaryRow label="Risk per share" value={formatMoney(calc.riskPerShare, currency)} />
           <SummaryRow label="Reward per share" value={formatMoney(calc.riskPerShare * rrRatio, currency)} />
           <div className="my-2 h-px bg-white/10" />
-          <SummaryRow label="Actual risk on position" value={formatMoney(calc.actualRisk, currency)} valueClass="text-red-400" />
-          <SummaryRow label="Potential reward" value={formatMoney(calc.potentialProfit, currency)} valueClass="text-emerald-400" />
+          <SummaryRow
+            label="Capital allocated"
+            value={hasBudget ? `${formatMoney(calc.positionValue, currency)} (${calc.capitalDeployedPct.toFixed(1)}%)` : `${currSymbol}0 (—)`}
+            valueClass="text-emerald-400 font-semibold"
+          />
+          {riskPlan && (
+            <SummaryRow
+              label="Unallocated cash buffer"
+              value={hasBudget ? `${formatMoney(riskPlan.unallocatedBuffer, currency)} (${riskPlan.unallocatedBufferPct.toFixed(1)}%)` : `${currSymbol}0 (—)`}
+              valueClass="text-slate-300"
+            />
+          )}
+          <SummaryRow
+            label="Actual risk on position"
+            value={hasBudget ? formatMoney(calc.actualRisk, currency) : `${currSymbol}0`}
+            valueClass="text-red-400"
+          />
+          <SummaryRow
+            label="Potential reward"
+            value={hasBudget ? formatMoney(calc.potentialProfit, currency) : `${currSymbol}0`}
+            valueClass="text-emerald-400"
+          />
           <div className="my-2 h-px bg-white/10" />
-          <SummaryRow label="Capital at risk" value={`${calc.capitalAtRiskPct.toFixed(2)}%`} valueClass="text-amber-400" />
+          <SummaryRow
+            label="Capital at risk"
+            value={hasBudget ? `${calc.capitalAtRiskPct.toFixed(2)}%` : '—'}
+            valueClass="text-amber-400"
+          />
           <SummaryRow label="Risk : Reward" value={`1 : ${formatRatio(rrRatio)}`} valueClass="text-cyan-300 font-bold" />
         </div>
 
+        {!hasBudget && (
+          <div className="mt-3.5 flex items-center gap-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200">
+            <Info className="h-4 w-4 shrink-0 text-cyan-400" />
+            <span>Enter budget to calculate allocation and risk limits</span>
+          </div>
+        )}
+
         <button
           onClick={onCopy}
-          className={`group mt-4 flex w-full items-center justify-center gap-2 rounded-lg border py-2.5 text-sm font-semibold transition-all duration-300 active:scale-[0.98] ${
-            copied
-              ? 'border-emerald-400/50 bg-emerald-400/15 text-emerald-300'
-              : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200 hover:border-cyan-300/70 hover:bg-cyan-400/20 hover:shadow-[0_0_20px_rgba(34,211,238,0.25)]'
+          disabled={!hasBudget}
+          className={`group mt-3 flex w-full items-center justify-center gap-2 rounded-lg border py-2.5 text-sm font-semibold transition-all duration-300 ${
+            !hasBudget
+              ? 'border-white/10 bg-white/5 text-slate-500 cursor-not-allowed opacity-60'
+              : copied
+              ? 'border-emerald-400/50 bg-emerald-400/15 text-emerald-300 active:scale-[0.98]'
+              : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200 hover:border-cyan-300/70 hover:bg-cyan-400/20 hover:shadow-[0_0_20px_rgba(34,211,238,0.25)] active:scale-[0.98]'
           }`}
         >
           {copied ? (
@@ -1391,6 +1229,23 @@ function ResultsGrid({
             </>
           )}
         </button>
+
+        {onConvene && (
+          <button
+            onClick={onConvene}
+            disabled={!hasBudget || isCommitteeRunning}
+            className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-500/30 bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-purple-500/10 py-2.5 text-xs font-bold text-cyan-200 transition-all hover:border-cyan-400/60 hover:from-cyan-500/20 hover:to-blue-500/20 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Sparkles className={`h-4 w-4 text-cyan-300 ${isCommitteeRunning ? 'animate-spin' : ''}`} />
+            <span>
+              {isCommitteeRunning
+                ? 'Committee Deliberating...'
+                : !hasBudget
+                ? 'Enter Budget to Convene Committee'
+                : 'Convene Multi-Agent Committee'}
+            </span>
+          </button>
+        )}
       </Card>
     </div>
   );
