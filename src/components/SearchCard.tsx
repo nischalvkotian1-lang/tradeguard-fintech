@@ -6,7 +6,6 @@ import {
   AlertCircle,
   X,
   ChevronRight,
-  Sparkles,
 } from 'lucide-react';
 import { searchStocks, NSEStock } from '../data/nseStocks';
 

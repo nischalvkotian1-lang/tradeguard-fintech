@@ -226,7 +226,17 @@ export interface RiskControllerSignOff {
 }
 
 export interface CommitteeSynthesis {
-  consensusStance: 'Strong Buy' | 'Moderate Buy' | 'Hold / Selective' | 'Avoid / Reduce';
+  consensusStance:
+    | 'STRONG BUY'
+    | 'CAUTIOUS BUY'
+    | 'NEUTRAL / HOLD'
+    | 'AVOID / HIGH RISK'
+    | 'NEUTRAL'
+    | 'AVOID'
+    | 'Strong Buy'
+    | 'Moderate Buy'
+    | 'Hold / Selective'
+    | 'Avoid / Reduce';
   averageConfidence: number; // 0 - 100
   keyAgreementSummary: string;
   irreconcilableDissent: string[];

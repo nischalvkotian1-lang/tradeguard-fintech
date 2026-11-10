@@ -16,7 +16,7 @@ import {
   Pause,
   FastForward,
   RotateCcw,
-  Sparkles,
+  Activity,
   ArrowRight,
   Clock,
 } from 'lucide-react';
@@ -159,8 +159,11 @@ export const DebateArena: React.FC<DebateArenaProps> = ({
       case 'CAUTIOUS BUY':
         return 'border-cyan-500/40 bg-cyan-500/15 text-cyan-200 ring-1 ring-cyan-500/30';
       case 'NEUTRAL':
+      case 'NEUTRAL / HOLD':
         return 'border-amber-500/40 bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/30';
       case 'AVOID':
+      case 'AVOID / HIGH RISK':
+      default:
         return 'border-rose-500/40 bg-rose-500/15 text-rose-200 ring-1 ring-rose-500/30';
     }
   };
@@ -374,7 +377,7 @@ export const DebateArena: React.FC<DebateArenaProps> = ({
                   <div className="my-5 flex items-center gap-3">
                     <div className="h-px flex-1 bg-gradient-to-r from-transparent via-cyan-500/30 to-transparent" />
                     <div className="flex items-center gap-2 rounded-full border border-cyan-500/40 bg-navy-950 px-3.5 py-1 text-[11px] font-bold uppercase tracking-wider text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.2)]">
-                      <Sparkles className="h-3 w-3 text-cyan-400" />
+                      <Activity className="h-3 w-3 text-cyan-400" />
                       <span>{msg.roundTitle}</span>
                     </div>
                     <div className="h-px flex-1 bg-gradient-to-r from-transparent via-cyan-500/30 to-transparent" />
@@ -515,7 +518,7 @@ export const DebateArena: React.FC<DebateArenaProps> = ({
                   <ShieldCheck className="h-6 w-6 text-emerald-400" />
                 ) : synthesis.consensusStance === 'CAUTIOUS BUY' ? (
                   <CheckCircle2 className="h-6 w-6 text-cyan-400" />
-                ) : synthesis.consensusStance === 'NEUTRAL' ? (
+                ) : synthesis.consensusStance === 'NEUTRAL' || synthesis.consensusStance === 'NEUTRAL / HOLD' ? (
                   <AlertTriangle className="h-6 w-6 text-amber-400" />
                 ) : (
                   <ShieldAlert className="h-6 w-6 text-rose-400" />

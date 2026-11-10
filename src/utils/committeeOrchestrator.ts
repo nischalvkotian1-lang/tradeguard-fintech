@@ -24,6 +24,15 @@ import {
   generateJonesFallbackAnalysis,
 } from '../agents/paulTudorJones';
 import { NSE_STOCKS } from '../data/nseStocks';
+import {
+  normalizeMetrics,
+  normalizeTradeParams,
+  calculateGrahamScore,
+  calculateBuffettScore,
+  calculateMungerScore,
+  calculateJonesScore,
+  calculateCommitteeSynthesis,
+} from '../services/debateSimulator';
 
 export interface StockContext {
   symbol: string;
@@ -106,160 +115,236 @@ Round 3: Committee Synthesis & Risk Controller Verdict
  * Generates dynamic, realistic perspectives based strictly on live fundamentals and risk metrics
  */
 function generateRealisticPerspectives(stock: StockContext, riskPlan: RiskPlanResult): AgentPerspective[] {
-  const sym = stock.symbol;
-  const isProfitable = (stock.netIncome ?? 0) > 0;
-  const isHighDebt = (stock.debtToEquity ?? 0) > 1.0;
-  const isLargeCap = (stock.marketCap ?? 0) >= 8e11;
-  const isStrongFii = (stock.institutionalOwnershipPct ?? 0) >= 40;
-  const hasZeroShares = riskPlan.recommendedShares === 0;
+  const normMetrics = normalizeMetrics(stock);
+  const normTradeParams = normalizeTradeParams(stock, riskPlan, normMetrics);
 
-  // 1. Value Specialist (Benjamin Graham Model Brain)
-  const matchingStock = NSE_STOCKS.find(
-    (s) => s.displaySymbol === stock.symbol || s.symbol === stock.symbol
-  );
-  const sector = matchingStock?.sector ?? 'Indian Equities';
-  const grahamMetrics = deriveStockMetricsFromContext(
-    stock.symbol,
-    stock.companyName,
-    stock.currentPrice,
-    stock.marketCap,
-    stock.netIncome,
-    stock.totalEquity,
-    stock.debtToEquity,
-    sector
-  );
-  const grahamAnalysis = generateGrahamFallbackAnalysis(grahamMetrics, riskPlan.budget);
+  const gScore = calculateGrahamScore(normMetrics);
+  const bScore = calculateBuffettScore(normMetrics);
+  const mScore = calculateMungerScore(normMetrics);
+  const jResult = calculateJonesScore(normMetrics, normTradeParams);
 
-  const valueStance: 'Bullish' | 'Neutral' | 'Bearish' | 'Cautious' =
-    grahamAnalysis.stance === 'BULLISH'
-      ? 'Bullish'
-      : grahamAnalysis.stance === 'BEARISH'
-      ? 'Bearish'
-      : 'Cautious';
+  const sym = normMetrics.symbol;
+  const price = normMetrics.currentPrice;
+  const pe = normMetrics.peRatio;
+  const pb = normMetrics.pbRatio;
+  const roe = normMetrics.roe;
+  const de = normMetrics.debtToEquity;
+  const grahamNo = normMetrics.grahamNumber;
+  const budget = normTradeParams.budget;
+  const shares = normTradeParams.wholeShares;
+  const stop = normTradeParams.stopLoss;
+  const lossAmount = normTradeParams.rupeeDrawdown;
+  const lossPercent = normTradeParams.drawdownPct;
+  const verdict = jResult.verdict;
+
+  const isGrahamCheap = price <= grahamNo || pe < 22;
+  const isBuffettHighRoe = roe > 18;
+  const isMungerHighDebt = de > 0.8;
+
+  // 1. Value Specialist (Benjamin Graham)
+  const grahamThesis = isGrahamCheap
+    ? `At a P/E of ${pe.toFixed(1)}, ${sym} offers a rare genuine margin of safety against intrinsic value ₹${formatINR(grahamNo)}.`
+    : `Speculative madness. At ${pe.toFixed(1)}x earnings, ${sym} trades far above its liquidation and net current asset buffer.`;
+
+  const mosPct =
+    grahamNo > 0
+      ? Number((((grahamNo - price) / grahamNo) * 100).toFixed(1))
+      : -100;
 
   const valuePerspective: AgentPerspective = {
     agentRole: 'Value Specialist',
-    stance: valueStance,
-    confidenceScore: grahamAnalysis.score,
-    coreThesis: grahamAnalysis.thesis,
+    stance: gScore >= 65 ? 'Bullish' : gScore <= 40 ? 'Bearish' : 'Cautious',
+    confidenceScore: gScore,
+    coreThesis: grahamThesis,
     supportingDataPoints: [
-      `Graham Number: ₹${formatINR(grahamAnalysis.grahamNumber)} (${grahamAnalysis.marginOfSafetyPct >= 0 ? '+' : ''}${grahamAnalysis.marginOfSafetyPct}% margin of safety).`,
-      ...grahamAnalysis.citations,
+      `Graham Number: ₹${formatINR(grahamNo)} (${mosPct >= 0 ? '+' : ''}${mosPct}% margin of safety).`,
+      `Trailing P/E: ${pe.toFixed(1)}x | P/B: ${pb.toFixed(1)}x (Product: ${(pe * pb).toFixed(1)}).`,
+      `Audited Debt-to-Equity: ${de.toFixed(2)}.`,
     ],
     redFlags:
-      grahamAnalysis.redFlags.length > 0
-        ? grahamAnalysis.redFlags
+      gScore < 60
+        ? [`Valuation multiple (${pe.toFixed(1)}x) exceeds conservative asset protection benchmarks.`]
         : ['Strictly monitor for any multiple expansion beyond defensive thresholds.'],
     keyCitations: [
-      `Graham No: ₹${formatINR(grahamAnalysis.grahamNumber)}`,
-      `Margin of Safety: ${grahamAnalysis.marginOfSafetyPct}%`,
-      `P/E × P/B: ${(grahamMetrics.pe * grahamMetrics.pb).toFixed(1)}`,
-      `D/E: ${grahamMetrics.debtToEquity.toFixed(2)}`,
+      `Graham No: ₹${formatINR(grahamNo)}`,
+      `Margin of Safety: ${mosPct}%`,
+      `P/E: ${pe.toFixed(1)}x`,
+      `D/E: ${de.toFixed(2)}`,
     ],
-    grahamAnalysis,
+    grahamAnalysis: {
+      agentId: 'graham',
+      agentName: 'Benjamin Graham',
+      score: gScore,
+      stance: gScore >= 65 ? 'BULLISH' : gScore <= 40 ? 'BEARISH' : 'NEUTRAL',
+      grahamNumber: grahamNo,
+      marginOfSafetyPct: mosPct,
+      checklist: {
+        peCheck: pe > 0 && pe <= 20,
+        pbCheck: pb > 0 && pb <= 2.5,
+        grahamMultiplierCheck: pe > 0 && pb > 0 && pe * pb <= 22.5,
+        debtCheck: de <= 1.0,
+        liquidityCheck: true,
+      },
+      thesis: grahamThesis,
+      citations: [
+        `P/E of ${pe.toFixed(1)} and P/B of ${pb.toFixed(1)}.`,
+        `Graham Number: ₹${formatINR(grahamNo)}.`,
+      ],
+      redFlags: mosPct < 0 ? [`Price exceeds Graham Number by ${Math.abs(mosPct)}%`] : [],
+    },
   };
 
-  // 2. Growth Specialist (Warren Buffett Model Brain)
-  const buffettMetrics = deriveBuffettMetrics(grahamMetrics, stock.netIncome, stock.totalEquity);
-  const buffettAnalysis = generateBuffettFallbackAnalysis(buffettMetrics, riskPlan.budget);
+  // 2. Growth Specialist (Warren Buffett)
+  const buffettThesis = isBuffettHighRoe
+    ? `Ben, you're valuing a cigar butt. ${sym}'s ROE of ${roe.toFixed(1)}% demonstrates an authentic economic moat with durable compounding.`
+    : `I agree with Ben here. Without pricing power or high returns on capital, ${sym} lacks the protective moat we require.`;
 
-  const growthStance: 'Bullish' | 'Neutral' | 'Bearish' | 'Cautious' =
-    buffettAnalysis.stance === 'BULLISH'
-      ? 'Bullish'
-      : buffettAnalysis.stance === 'BEARISH'
-      ? 'Bearish'
-      : 'Neutral';
+  const moatStr = isBuffettHighRoe ? 'WIDE' : roe >= 12 ? 'NARROW' : 'NONE';
+  const pricingPowerScore = Math.min(100, Math.round((normMetrics.profitMargin / 25) * 100));
 
   const growthPerspective: AgentPerspective = {
     agentRole: 'Growth Specialist',
-    stance: growthStance,
-    confidenceScore: buffettAnalysis.score,
-    coreThesis: buffettAnalysis.thesis,
+    stance: bScore >= 65 ? 'Bullish' : bScore <= 40 ? 'Bearish' : 'Neutral',
+    confidenceScore: bScore,
+    coreThesis: buffettThesis,
     supportingDataPoints: [
-      `Economic Moat: ${buffettAnalysis.moatStrength} MOAT (Pricing Power Score: ${buffettAnalysis.pricingPowerScore}/100).`,
-      ...buffettAnalysis.citations,
+      `Economic Moat: ${moatStr} MOAT (Pricing Power Score: ${pricingPowerScore}/100).`,
+      `Return on Equity (ROE): ${roe.toFixed(1)}% across business cycles.`,
+      `Operating & Net Profit Margin: ~${normMetrics.profitMargin}%.`,
     ],
     redFlags:
-      buffettAnalysis.redFlags.length > 0
-        ? buffettAnalysis.redFlags
+      bScore < 60
+        ? [`Return on capital (${roe.toFixed(1)}%) lacks required compounding durability.`]
         : ['Watch for margin erosion if input cost pressures mount without pricing response.'],
     keyCitations: [
-      `Moat: ${buffettAnalysis.moatStrength}`,
-      `Pricing Power: ${buffettAnalysis.pricingPowerScore}/100`,
-      `ROE: ${buffettMetrics.roe.toFixed(1)}%`,
-      `P/E: ${buffettMetrics.pe.toFixed(1)}`,
+      `Moat: ${moatStr}`,
+      `Pricing Power: ${pricingPowerScore}/100`,
+      `ROE: ${roe.toFixed(1)}%`,
+      `P/E: ${pe.toFixed(1)}`,
     ],
-    buffettAnalysis,
+    buffettAnalysis: {
+      agentId: 'buffett',
+      agentName: 'Warren Buffett',
+      score: bScore,
+      stance: bScore >= 65 ? 'BULLISH' : bScore <= 40 ? 'BEARISH' : 'NEUTRAL',
+      moatStrength: moatStr,
+      pricingPowerScore,
+      checklist: {
+        roeCheck: roe >= 15.0,
+        operatingMarginCheck: normMetrics.profitMargin >= 14.0,
+        conservativeDebtCheck: de <= 0.8,
+        fcfPositiveCheck: de < 1.2,
+        valuationSanityCheck: pe <= 32.0,
+      },
+      thesis: buffettThesis,
+      citations: [
+        `Sustainable ROE: ${roe.toFixed(1)}%.`,
+        `Economic moat classification: ${moatStr}.`,
+      ],
+      redFlags: bScore < 60 ? ['Fails high return on capital hurdle'] : [],
+    },
   };
 
-  // 3. Quality Auditor (Charlie Munger Model Brain)
-  const mungerAnalysis = generateMungerFallbackAnalysis(grahamMetrics, riskPlan.budget);
+  // 3. Quality Auditor (Charlie Munger)
+  const mungerThesis = isMungerHighDebt
+    ? `Invert, always invert! A Debt-to-Equity of ${de.toFixed(2)} is financial arsenic if credit tightens in Dalal Street.`
+    : `Clean ledger. Minimal leverage with ${de.toFixed(2)} D/E lets us sleep soundly during market panics.`;
 
-  const qualityStance: 'Bullish' | 'Neutral' | 'Bearish' | 'Cautious' =
-    mungerAnalysis.stance === 'BULLISH'
-      ? 'Bullish'
-      : mungerAnalysis.stance === 'BEARISH'
-      ? 'Bearish'
-      : 'Cautious';
+  const solvencyStatus = de < 0.3 ? 'PRISTINE' : de <= 1.2 ? 'ADEQUATE' : 'OVERLEVERAGED';
+  const fragilityRating = de > 1.2 ? 'CRITICAL' : de > 0.8 ? 'MODERATE' : 'LOW';
 
   const qualityPerspective: AgentPerspective = {
     agentRole: 'Quality Auditor',
-    stance: qualityStance,
-    confidenceScore: mungerAnalysis.score,
-    coreThesis: mungerAnalysis.thesis,
+    stance: mScore >= 65 ? 'Bullish' : mScore <= 40 ? 'Bearish' : 'Cautious',
+    confidenceScore: mScore,
+    coreThesis: mungerThesis,
     supportingDataPoints: [
-      `Solvency Audit: ${mungerAnalysis.solvencyStatus} (Fragility Rating: ${mungerAnalysis.fragilityRating}).`,
-      ...mungerAnalysis.citations,
+      `Solvency Audit: ${solvencyStatus} (Fragility Rating: ${fragilityRating}).`,
+      `Debt-to-Equity: ${de.toFixed(2)} | Inversion stress-test passed: ${de <= 1.2 ? 'YES' : 'NO'}.`,
     ],
     redFlags:
-      mungerAnalysis.redFlags.length > 0
-        ? mungerAnalysis.redFlags
+      de > 1.2
+        ? [`Excessive debt structure (${de.toFixed(2)} D/E) introduces acute solvency fragility.`]
         : ['Maintain strict discipline against unexpected working capital decay.'],
     keyCitations: [
-      `Solvency: ${mungerAnalysis.solvencyStatus}`,
-      `Fragility: ${mungerAnalysis.fragilityRating}`,
-      `D/E: ${grahamMetrics.debtToEquity.toFixed(2)}`,
-      `Inversion Test: ${mungerAnalysis.checklist.inversionTestPassed ? 'PASSED' : 'FAILED'}`,
+      `Solvency: ${solvencyStatus}`,
+      `Fragility: ${fragilityRating}`,
+      `D/E: ${de.toFixed(2)}`,
+      `Inversion Test: ${de <= 1.2 ? 'PASSED' : 'FAILED'}`,
     ],
-    mungerAnalysis,
+    mungerAnalysis: {
+      agentId: 'munger',
+      agentName: 'Charlie Munger',
+      score: mScore,
+      stance: mScore >= 65 ? 'BULLISH' : mScore <= 40 ? 'BEARISH' : 'NEUTRAL',
+      fragilityRating,
+      solvencyStatus,
+      checklist: {
+        noExcessiveDebtCheck: de <= 0.7,
+        interestCoverageCheck: de <= 0.9,
+        capitalDisciplineCheck: de <= 1.1,
+        inversionTestPassed: de <= 1.2,
+        valuationRationalityCheck: pe <= 35.0,
+      },
+      thesis: mungerThesis,
+      citations: [
+        `Solvency profile: ${solvencyStatus}.`,
+        `Debt-to-Equity: ${de.toFixed(2)}.`,
+      ],
+      redFlags: de > 1.2 ? ['Elevated balance sheet fragility'] : [],
+    },
   };
 
-  // 4. Risk Controller (Paul Tudor Jones Model Brain)
-  const tradeParams = extractTradeParameters(riskPlan);
-  const jonesAnalysis = generateJonesFallbackAnalysis(grahamMetrics, tradeParams);
-
-  const riskStance: 'Bullish' | 'Neutral' | 'Bearish' | 'Cautious' =
-    jonesAnalysis.verdict === 'APPROVED'
-      ? 'Bullish'
-      : jonesAnalysis.verdict === 'VETOED'
-      ? 'Bearish'
-      : 'Cautious';
+  // 4. Risk Controller (Paul Tudor Jones)
+  const jonesThesis = `Cut the philosophy. With a ₹${formatINR(budget)} budget and ${shares} shares, our downside exposure to stop-loss ₹${formatINR(stop)} is ₹${formatINR(lossAmount)} (${lossPercent}% of capital). Verdict: ${verdict}.`;
 
   const riskPerspective: AgentPerspective = {
     agentRole: 'Risk Controller',
-    stance: riskStance,
-    confidenceScore: jonesAnalysis.score,
-    coreThesis: jonesAnalysis.thesis,
+    stance: jResult.verdict === 'APPROVED' ? 'Bullish' : 'Bearish',
+    confidenceScore: jResult.score,
+    coreThesis: jonesThesis,
     supportingDataPoints: [
-      `Verdict: ${jonesAnalysis.verdict} • Asymmetry: ${jonesAnalysis.riskRewardRatio} R:R.`,
-      `Directive: ${jonesAnalysis.executionDirective}`,
-      ...jonesAnalysis.citations,
+      `Verdict: ${jResult.verdict} • Downside Exposure: ₹${formatINR(lossAmount)} (${lossPercent}% of budget).`,
+      `Sizing: ${shares} whole shares deployed at ₹${formatINR(normTradeParams.capitalAllocated)}.`,
+      `Stop-Loss Floor: ₹${formatINR(stop)} strictly enforced.`,
     ],
     redFlags:
-      jonesAnalysis.redFlags.length > 0
-        ? jonesAnalysis.redFlags
-        : [
-            `Slippage risk: Planned stop-loss at ₹${formatINR(
-              riskPlan.plannedStopLossPrice
-            )} relies on active order matching.`,
-          ],
+      jResult.verdict === 'VETOED'
+        ? [`Downside drawdown of ${lossPercent}% exceeds the strict 2% capital threshold.`]
+        : [`Slippage risk: Planned stop-loss at ₹${formatINR(stop)} relies on market order liquidity.`],
     keyCitations: [
-      `Verdict: ${jonesAnalysis.verdict}`,
-      `R:R: ${jonesAnalysis.riskRewardRatio}`,
-      `Capped Loss: ₹${formatINR(jonesAnalysis.maxCapitalAtRisk)}`,
-      `Shares: ${tradeParams.recommendedShares}`,
+      `Verdict: ${jResult.verdict}`,
+      `Drawdown: ${lossPercent}%`,
+      `Capped Loss: ₹${formatINR(lossAmount)}`,
+      `Shares: ${shares}`,
     ],
-    jonesAnalysis,
+    jonesAnalysis: {
+      agentId: 'jones',
+      agentName: 'Paul Tudor Jones',
+      score: jResult.score,
+      stance: jResult.verdict === 'APPROVED' ? 'BULLISH' : 'BEARISH',
+      verdict: jResult.verdict,
+      riskRewardRatio: '1 : 2.0',
+      maxCapitalAtRisk: lossAmount,
+      executionDirective:
+        jResult.verdict === 'APPROVED'
+          ? `Execute ${shares} whole shares at market entry. GTT stop-loss active at ₹${formatINR(stop)}.`
+          : 'DO NOT EXECUTE. Capital preservation rule triggered. Stand aside in cash.',
+      checklist: {
+        wholeShareCapacityCheck: shares > 0,
+        asymmetricRewardCheck: true,
+        lossCappedCheck: lossPercent <= 2.0,
+        liquidityCheck: true,
+        stopLossEnforcedCheck: stop > 0,
+      },
+      thesis: jonesThesis,
+      citations: [
+        `Position: ${shares} shares (₹${formatINR(normTradeParams.capitalAllocated)}).`,
+        `Stop-Loss: ₹${formatINR(stop)}.`,
+        `Rupee Drawdown: ₹${formatINR(lossAmount)} (${lossPercent}%).`,
+      ],
+      redFlags: jResult.verdict === 'VETOED' ? ['Drawdown exceeds 2% capital limit'] : [],
+    },
   };
 
   return [valuePerspective, growthPerspective, qualityPerspective, riskPerspective];
@@ -275,7 +360,25 @@ function generateRealisticDebate(
 ): DebateRebuttal[] {
   if (activeRoles.size < 2) return [];
 
-  const isHighDebt = (stock.debtToEquity ?? 0) > 1.0;
+  const normMetrics = normalizeMetrics(stock);
+  const normTradeParams = normalizeTradeParams(stock, riskPlan, normMetrics);
+  const jResult = calculateJonesScore(normMetrics, normTradeParams);
+
+  const sym = normMetrics.symbol;
+  const pe = normMetrics.peRatio;
+  const roe = normMetrics.roe;
+  const de = normMetrics.debtToEquity;
+  const grahamNo = normMetrics.grahamNumber;
+  const budget = normTradeParams.budget;
+  const shares = normTradeParams.wholeShares;
+  const stop = normTradeParams.stopLoss;
+  const lossAmount = normTradeParams.rupeeDrawdown;
+  const lossPercent = normTradeParams.drawdownPct;
+  const verdict = jResult.verdict;
+
+  const isGrahamCheap = normMetrics.currentPrice <= grahamNo || pe < 22;
+  const isBuffettHighRoe = roe > 18;
+  const isHighDebt = de > 0.8;
 
   const allRebuttals: DebateRebuttal[] = [
     {
@@ -283,19 +386,17 @@ function generateRealisticDebate(
       speakingAgent: 'Quality Auditor',
       targetAgent: 'Growth Specialist',
       targetClaim: 'Growth Specialist assumes aggressive revenue reinvestment without modeling balance sheet friction.',
-      rebuttalArgument: `Growth Specialist is banking on forward top-line acceleration, but ignores that ${stock.symbol} ${
-        isHighDebt
-          ? `has a concerning Debt-to-Equity ratio of ${formatDebtRatio(stock.debtToEquity)}. In an era of non-zero interest rates, debt obligations take precedence over growth CAPEX.`
-          : `must maintain its working capital discipline. Unchecked expansion could erode return on equity (ROE).`
-      }`,
+      rebuttalArgument: isHighDebt
+        ? `Invert, always invert! A Debt-to-Equity of ${de.toFixed(2)} is financial arsenic if credit tightens in Dalal Street. In an era of non-zero interest rates, debt obligations take precedence over growth CAPEX.`
+        : `Clean ledger. Minimal leverage with ${de.toFixed(2)} D/E lets us sleep soundly during market panics. However, unmanaged operational expansion could still erode return on equity (ROE).`,
       counterEvidence: [
-        `Debt-to-Equity is ${formatDebtRatio(stock.debtToEquity)}`,
-        'Interest coverage must be maintained under stressed revenue scenarios.',
+        `Debt-to-Equity: ${de.toFixed(2)}`,
+        `Operating Margin: ~${normMetrics.profitMargin}%`,
       ],
       disagreementFlag: {
         conflictType: 'Debt vs Expansion',
         severity: isHighDebt ? 'Sharp' : 'Moderate',
-        summary: `Charlie Munger (Quality Auditor) challenges Warren Buffett (Growth Specialist): Balance sheet leverage cannot be brushed aside for optimistic growth projections.`,
+        summary: `Charlie Munger (Quality Auditor) challenges Warren Buffett (Growth Specialist): Balance sheet leverage (${de.toFixed(2)} D/E) cannot be brushed aside for optimistic growth projections.`,
       },
     },
     {
@@ -303,15 +404,18 @@ function generateRealisticDebate(
       speakingAgent: 'Value Specialist',
       targetAgent: 'Growth Specialist',
       targetClaim: 'Growth Specialist is willing to pay premium multiples on current market price.',
-      rebuttalArgument: `At ₹${formatINR(stock.currentPrice)}, the current price already bakes in double-digit growth expectations. If quarterly earnings miss guidance by even 200 basis points, multiple compression will inflict rapid capital drawdown before the growth thesis matures.`,
+      rebuttalArgument: isGrahamCheap
+        ? `At a P/E of ${pe.toFixed(1)}, ${sym} offers a rare genuine margin of safety against intrinsic value ₹${formatINR(grahamNo)}. Paying above this benchmark compromises principal protection.`
+        : `Speculative madness. At ${pe.toFixed(1)}x earnings, ${sym} trades far above its liquidation and net current asset buffer. Market price ₹${formatINR(normMetrics.currentPrice)} dwarfs our Graham Number of ₹${formatINR(grahamNo)}.`,
       counterEvidence: [
-        `Entry price: ₹${formatINR(stock.currentPrice)}`,
-        `Net Income: ${formatCr(stock.netIncome)}`,
+        `Current P/E: ${pe.toFixed(1)}x`,
+        `Graham Number: ₹${formatINR(grahamNo)}`,
+        `Market Price: ₹${formatINR(normMetrics.currentPrice)}`,
       ],
       disagreementFlag: {
         conflictType: 'Valuation vs Growth',
         severity: 'Moderate',
-        summary: `Benjamin Graham (Value Specialist) rejects paying rich multiples without an adequate margin of safety buffer.`,
+        summary: `Benjamin Graham (Value Specialist) challenges Warren Buffett (Growth Specialist): P/E of ${pe.toFixed(1)}x vs Graham Number ₹${formatINR(grahamNo)}.`,
       },
     },
     {
@@ -319,16 +423,16 @@ function generateRealisticDebate(
       speakingAgent: 'Risk Controller',
       targetAgent: 'Growth Specialist',
       targetClaim: 'Specialists proposing larger position sizes without capping rupee downside.',
-      rebuttalArgument: `I am overruling any suggestions to stretch beyond our deterministic ceiling. Regardless of growth conviction, trader budget of ₹${formatINR(riskPlan.budget)} mandates a hard cap of ${riskPlan.recommendedShares} whole shares. No trader should absorb more than ₹${formatINR(riskPlan.maxPlannedLoss)} in planned downside.`,
+      rebuttalArgument: `Cut the philosophy. With a ₹${formatINR(budget)} budget and ${shares} shares, our downside exposure to stop-loss ₹${formatINR(stop)} is ₹${formatINR(lossAmount)} (${lossPercent}% of capital). Verdict: ${verdict}.`,
       counterEvidence: [
-        `Capped Shares: ${riskPlan.recommendedShares}`,
-        `Stop-Loss Floor: ₹${formatINR(riskPlan.plannedStopLossPrice)}`,
-        `Max Risk: ₹${formatINR(riskPlan.maxPlannedLoss)}`,
+        `Position Sizing: ${shares} Shares`,
+        `Stop-Loss Floor: ₹${formatINR(stop)}`,
+        `Max Rupee Drawdown: ₹${formatINR(lossAmount)} (${lossPercent}%)`,
       ],
       disagreementFlag: {
         conflictType: 'Downside vs Momentum',
         severity: 'Sharp',
-        summary: `Paul Tudor Jones (Risk Controller) enforces binding position size limit (${riskPlan.recommendedShares} shares) and non-negotiable stop-loss at ₹${formatINR(riskPlan.plannedStopLossPrice)}.`,
+        summary: `Paul Tudor Jones (Risk Controller) enforces 2% max risk limit: ${lossPercent}% capital risk with verdict: ${verdict}.`,
       },
     },
     {
@@ -336,15 +440,17 @@ function generateRealisticDebate(
       speakingAgent: 'Quality Auditor',
       targetAgent: 'Value Specialist',
       targetClaim: 'Value Specialist prioritizes low valuation multiples over enterprise durability.',
-      rebuttalArgument: `Benjamin Graham is searching for cigar-butt cheapness, but as Warren and I learned, a fair price for a wonderful business is vastly superior to a wonderful price for a fair business. Low multiples often signal structural decay.`,
+      rebuttalArgument: isBuffettHighRoe
+        ? `Ben, you're valuing a cigar butt. ${sym}'s ROE of ${roe.toFixed(1)}% demonstrates an authentic economic moat with durable compounding. Cheap multiples without economic moat is a value trap.`
+        : `I agree with Ben here. Without pricing power or high returns on capital, ${sym} lacks the protective moat we require. An ROE of ${roe.toFixed(1)}% fails our hurdle for compounders.`,
       counterEvidence: [
-        `Institutional ownership: ${stock.institutionalOwnershipPct ?? 0}%`,
-        'High ROE compounds intrinsic value over long holding horizons.',
+        `Return on Equity: ${roe.toFixed(1)}%`,
+        `Pricing Power: ${Math.min(100, Math.round((normMetrics.profitMargin / 25) * 100))}/100`,
       ],
       disagreementFlag: {
         conflictType: 'Valuation vs Growth',
         severity: 'Moderate',
-        summary: `Charlie Munger (Quality) challenges Benjamin Graham (Value): Cheap multiples without economic moat is a value trap.`,
+        summary: `Charlie Munger (Quality) challenges Benjamin Graham (Value): ROE of ${roe.toFixed(1)}% vs static valuation discount.`,
       },
     },
     {
@@ -352,15 +458,15 @@ function generateRealisticDebate(
       speakingAgent: 'Risk Controller',
       targetAgent: 'Value Specialist',
       targetClaim: 'Value Specialist assumes price will eventually mean-revert before margin of safety expires.',
-      rebuttalArgument: `Markets can stay irrational longer than a trader can stay solvent. Even if intrinsic value is higher, a trade without a strict stop-loss at ₹${formatINR(riskPlan.plannedStopLossPrice)} invites catastrophic drawdown. Rule number one: Never take a large loss.`,
+      rebuttalArgument: `Markets can stay irrational longer than a trader can stay solvent. Even if intrinsic value is higher, a trade without a strict stop-loss at ₹${formatINR(stop)} invites catastrophic drawdown. Rule number one: Never take a large loss.`,
       counterEvidence: [
-        `Planned stop-loss level: ₹${formatINR(riskPlan.plannedStopLossPrice)}`,
-        `Risk per share: ₹${formatINR(stock.currentPrice - riskPlan.plannedStopLossPrice)}`,
+        `Planned stop-loss level: ₹${formatINR(stop)}`,
+        `Risk per share: ₹${formatINR(normMetrics.currentPrice - stop)}`,
       ],
       disagreementFlag: {
         conflictType: 'Downside vs Momentum',
         severity: 'Sharp',
-        summary: `Paul Tudor Jones (Risk Controller) warns Benjamin Graham (Value): Mean-reversion conviction cannot substitute for risk control.`,
+        summary: `Paul Tudor Jones (Risk Controller) warns Benjamin Graham (Value): Mean-reversion conviction cannot substitute for stop-loss floor at ₹${formatINR(stop)}.`,
       },
     },
     {
@@ -368,15 +474,15 @@ function generateRealisticDebate(
       speakingAgent: 'Risk Controller',
       targetAgent: 'Quality Auditor',
       targetClaim: 'Quality Auditor believes great balance sheets eliminate the need for active trade protection.',
-      rebuttalArgument: `Even AAA balance sheets experience 30-50% drawdowns in broad market liquidations. Position sizing must stay capped at ${riskPlan.recommendedShares} shares to guarantee survival.`,
+      rebuttalArgument: `Even AAA balance sheets experience 30-50% drawdowns in broad market liquidations. With a ₹${formatINR(budget)} budget, position sizing must stay capped at ${shares} shares to guarantee survival.`,
       counterEvidence: [
-        `Max Rupee Loss Capped: ₹${formatINR(riskPlan.maxPlannedLoss)}`,
-        `Cash Buffer: ₹${formatINR(riskPlan.unallocatedBuffer)}`,
+        `Max Rupee Loss Capped: ₹${formatINR(lossAmount)}`,
+        `Cash Buffer: ₹${formatINR(normTradeParams.unallocatedBuffer)}`,
       ],
       disagreementFlag: {
         conflictType: 'Liquidity vs Conviction',
         severity: 'Moderate',
-        summary: `Paul Tudor Jones (Risk Controller) reminds Charlie Munger (Quality): Solvency is necessary but risk limits are non-negotiable.`,
+        summary: `Paul Tudor Jones (Risk Controller) reminds Charlie Munger (Quality): Solvency is necessary but 2% risk limit is non-negotiable.`,
       },
     },
   ];
@@ -395,80 +501,24 @@ function generateRealisticSynthesis(
   activeMasterIds: MasterId[],
   perspectives: AgentPerspective[]
 ): CommitteeSynthesis {
+  const normMetrics = normalizeMetrics(stock);
+  const normTradeParams = normalizeTradeParams(stock, riskPlan, normMetrics);
+  const simSynth = calculateCommitteeSynthesis(normMetrics, normTradeParams, activeMasterIds);
+  const jResult = calculateJonesScore(normMetrics, normTradeParams);
   const hasRiskController = activeMasterIds.includes('jones');
-  const matchingStock = NSE_STOCKS.find(
-    (s) => s.displaySymbol === stock.symbol || s.symbol === stock.symbol
-  );
-  const sector = matchingStock?.sector ?? 'Indian Equities';
-  const grahamMetrics = deriveStockMetricsFromContext(
-    stock.symbol,
-    stock.companyName,
-    stock.currentPrice,
-    stock.marketCap,
-    stock.netIncome,
-    stock.totalEquity,
-    stock.debtToEquity,
-    sector
-  );
-  const tradeParams = extractTradeParameters(riskPlan);
-  const jonesAnalysis = generateJonesFallbackAnalysis(grahamMetrics, tradeParams);
 
-  const isProfitable = (stock.netIncome ?? 0) > 0;
-  const isHighDebt = (stock.debtToEquity ?? 0) > 1.0;
-
-  let verdict: RiskVerdict = 'APPROVED';
-  let vetoExercised = false;
-  let headline = '';
-  let riskJustification = '';
-  let consensusStance: 'Strong Buy' | 'Moderate Buy' | 'Hold / Selective' | 'Avoid / Reduce' =
-    'Moderate Buy';
-
-  const avgConf =
-    perspectives.length > 0
-      ? Math.round(
-          perspectives.reduce((acc, cur) => acc + cur.confidenceScore, 0) / perspectives.length
-        )
-      : 70;
-
-  let finalScore = avgConf;
-
-  if (!hasRiskController) {
-    verdict = !isProfitable && isHighDebt ? 'CONDITIONAL_APPROVAL' : 'APPROVED';
-    vetoExercised = false;
-    headline = 'ADVISORY CONSENSUS: Risk Controller Veto Inactive';
-    riskJustification = `Deliberations concluded with ${activeMasterIds.length} active master${
-      activeMasterIds.length > 1 ? 's' : ''
-    }. Note: Paul Tudor Jones was not convened, so no binding sovereign veto or mechanical stop-loss enforcement was exercised. Trader must execute risk controls independently.`;
-    consensusStance = isProfitable && !isHighDebt ? 'Moderate Buy' : 'Hold / Selective';
-    finalScore = isProfitable ? 72 : 55;
-  } else {
-    verdict = jonesAnalysis.verdict;
-    vetoExercised = jonesAnalysis.verdict === 'VETOED';
-    headline =
-      jonesAnalysis.verdict === 'VETOED'
-        ? 'TRADE EXECUTION VETOED: Risk Controller Sovereign Veto'
-        : jonesAnalysis.verdict === 'CONDITIONAL_APPROVAL'
-        ? 'CONDITIONAL APPROVAL: Elevated Risk Flagged'
-        : 'COMMITTEE APPROVAL: Disciplined Execution Authorized';
-    riskJustification = jonesAnalysis.thesis;
-    consensusStance =
-      jonesAnalysis.verdict === 'VETOED'
-        ? 'Avoid / Reduce'
-        : jonesAnalysis.verdict === 'CONDITIONAL_APPROVAL'
-        ? 'Hold / Selective'
-        : 'Strong Buy';
-    finalScore = jonesAnalysis.verdict === 'VETOED' ? Math.min(30, avgConf) : avgConf;
-  }
+  const verdict: RiskVerdict = hasRiskController ? jResult.verdict : 'APPROVED';
+  const vetoExercised = hasRiskController && jResult.verdict === 'VETOED';
 
   const mandatoryConditions: string[] = [
-    `Execute exactly ${tradeParams.recommendedShares} whole shares (₹${formatINR(
-      tradeParams.capitalAllocated
+    `Execute exactly ${normTradeParams.wholeShares} whole shares (₹${formatINR(
+      normTradeParams.capitalAllocated
     )} capital deployed).`,
-    `Mandatory GTT / Stop-Loss order placed at ₹${formatINR(tradeParams.stopLossPrice)} (-${(
-      tradeParams.stopLossPct * 100
+    `Mandatory GTT / Stop-Loss order placed at ₹${formatINR(normTradeParams.stopLoss)} (-${(
+      normTradeParams.stopLossPct * 100
     ).toFixed(1)}%).`,
-    `Directive: ${jonesAnalysis.executionDirective}`,
-    `Retain ₹${formatINR(tradeParams.unallocatedBuffer)} in cash buffer to ensure account solvency.`,
+    `Directive: ${jResult.verdict === 'APPROVED' ? `Authorize whole-share delivery of ${normTradeParams.wholeShares} shares.` : 'DO NOT EXECUTE. Capital preservation rule triggered.'}`,
+    `Retain ₹${formatINR(normTradeParams.unallocatedBuffer)} in cash buffer to ensure account solvency.`,
     'Exit position immediately if price breaches stop-loss on closing candle.',
   ];
 
@@ -479,31 +529,22 @@ function generateRealisticSynthesis(
   }
 
   const synthesis: CommitteeSynthesis = {
-    consensusStance,
-    averageConfidence: avgConf,
-    keyAgreementSummary: `The committee unifies around disciplined whole-share execution. Active analysts acknowledge that at ₹${formatINR(
-      stock.currentPrice
-    )}, returns must be pursued strictly within our ₹${formatINR(
-      tradeParams.maxPlannedLoss
-    )} maximum capital risk ceiling.`,
-    irreconcilableDissent: [
-      `Growth thesis anticipates sustained forward volume, while Quality Auditor emphasizes balance sheet conservatism (${
-        stock.debtToEquity != null ? `D/E ${formatDebtRatio(stock.debtToEquity)}` : 'unverified debt'
-      }).`,
-      `Value Specialist demands price pullback towards deeper intrinsic discount, whereas active risk limits establish the deterministic boundary.`,
-    ],
+    consensusStance: simSynth.consensusStance,
+    averageConfidence: simSynth.committeeScore,
+    keyAgreementSummary: simSynth.keyAgreements[0] || `The committee unifies around disciplined whole-share execution of ${normTradeParams.wholeShares} shares.`,
+    irreconcilableDissent: simSynth.keyDissents,
     riskControllerSignOff: {
       verdict,
       vetoExercised,
-      verdictHeadline: headline,
-      riskJustification,
-      enforcedStopLossPrice: tradeParams.stopLossPrice,
-      enforcedShares: tradeParams.recommendedShares,
-      maxCapitalLossCapped: tradeParams.maxPlannedLoss,
+      verdictHeadline: simSynth.verdictTitle,
+      riskJustification: `Cut the philosophy. With a ₹${formatINR(normTradeParams.budget)} budget and ${normTradeParams.wholeShares} shares, our downside exposure to stop-loss ₹${formatINR(normTradeParams.stopLoss)} is ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}% of capital). Verdict: ${verdict}.`,
+      enforcedStopLossPrice: normTradeParams.stopLoss,
+      enforcedShares: normTradeParams.wholeShares,
+      maxCapitalLossCapped: normTradeParams.rupeeDrawdown,
       mandatoryConditions,
-      liquidityAssessment: `NSE order book liquidity is deemed sufficient for whole-share block of ${tradeParams.recommendedShares} shares. Execution slippage expected <0.25%.`,
+      liquidityAssessment: `NSE order book liquidity is deemed sufficient for whole-share block of ${normTradeParams.wholeShares} shares. Execution slippage expected <0.25%.`,
     },
-    finalCommitteeScore: finalScore,
+    finalCommitteeScore: simSynth.committeeScore,
   };
 
   return synthesis;

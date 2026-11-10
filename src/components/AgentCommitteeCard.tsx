@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   Users,
   ShieldCheck,
@@ -7,7 +7,7 @@ import {
   CheckCircle2,
   XCircle,
   Lock,
-  Sparkles,
+  Activity,
   RefreshCw,
   ArrowRight,
   Flame,
@@ -40,6 +40,14 @@ import {
   DebateMode,
   DebateStreamStatus,
   DebateStreamControls,
+  normalizeMetrics,
+  normalizeTradeParams,
+  calculateGrahamScore,
+  calculateBuffettScore,
+  calculateMungerScore,
+  calculateJonesScore,
+  calculateCommitteeSynthesis,
+  formatINR,
 } from '../services/debateSimulator';
 import DebateArena from './DebateArena';
 
@@ -59,26 +67,11 @@ export interface AgentCommitteeCardProps {
   className?: string;
 }
 
-function formatINR(val: number): string {
-  const rounded = Number.isFinite(val) ? val : 0;
-  return new Intl.NumberFormat('en-IN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(rounded);
-}
-
 const MASTER_ACTIVE_BORDERS: Record<MasterId, string> = {
   graham: 'border-emerald-400',
   buffett: 'border-cyan-400',
   munger: 'border-blue-400',
   jones: 'border-rose-400',
-};
-
-const MASTER_AVATARS: Record<MasterId, string> = {
-  graham: '/avatars/graham.png',
-  buffett: '/avatars/buffet.png',
-  munger: '/avatars/munger.png',
-  jones: '/avatars/jones.png',
 };
 
 export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
@@ -121,60 +114,78 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
   const debateAbortRef = useRef<AbortController | null>(null);
   const streamControlsRef = useRef<DebateStreamControls | null>(null);
 
+  // Dynamic Metric Ingestion & Fallback Safeguards
+  const normMetrics = useMemo(() => normalizeMetrics(stock), [stock]);
+  const normTradeParams = useMemo(
+    () => normalizeTradeParams(stock, riskPlan, normMetrics),
+    [stock, riskPlan, normMetrics]
+  );
+  const dynamicSynthesis = useMemo(
+    () => calculateCommitteeSynthesis(normMetrics, normTradeParams, activeMasterIds),
+    [normMetrics, normTradeParams, activeMasterIds]
+  );
+  const jResult = useMemo(
+    () => calculateJonesScore(normMetrics, normTradeParams),
+    [normMetrics, normTradeParams]
+  );
+
   const isRunning =
     stage === 'independent_analysis' ||
     stage === 'cross_examination' ||
     stage === 'synthesis_veto';
   const isCompleted = stage === 'completed';
-  const hasData = round1Perspectives.length > 0;
+  const hasData = round1Perspectives.length > 0 || debateMessages.length > 0;
   const isPTJActive = activeMasterIds.includes('jones');
   const hasBudget = (riskPlan?.budget ?? 0) > 0;
 
-  const startDebateStream = useCallback(async (modeToUse: DebateMode = debateMode) => {
-    if (debateAbortRef.current) {
-      debateAbortRef.current.abort();
-    }
-    const controller = new AbortController();
-    debateAbortRef.current = controller;
+  const startDebateStream = useCallback(
+    async (modeToUse: DebateMode = debateMode) => {
+      if (debateAbortRef.current) {
+        debateAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      debateAbortRef.current = controller;
 
-    setDebateMessages([]);
-    setSimulatorSynthesis(null);
-    setIsDebateStreaming(true);
-    setCurrentSpeakerId(null);
-    setIsStreamPaused(false);
-    setStreamStatus(null);
-
-    try {
-      await streamDebate(
-        stock,
-        riskPlan,
-        activeMasterIds,
-        (msg) => {
-          setDebateMessages((prev) => [...prev, msg]);
-          setCurrentSpeakerId(msg.speakerId);
-        },
-        (synth) => {
-          setSimulatorSynthesis(synth);
-          setIsDebateStreaming(false);
-          setCurrentSpeakerId(null);
-          setIsStreamPaused(false);
-        },
-        controller.signal,
-        undefined,
-        modeToUse,
-        (status) => {
-          setStreamStatus(status);
-          setIsStreamPaused(status.isPaused);
-        },
-        streamControlsRef
-      );
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      setIsDebateStreaming(false);
+      setDebateMessages([]);
+      setSimulatorSynthesis(null);
+      setIsDebateStreaming(true);
       setCurrentSpeakerId(null);
       setIsStreamPaused(false);
-    }
-  }, [stock, riskPlan, activeMasterIds, debateMode]);
+      setStreamStatus(null);
+
+      try {
+        await streamDebate(
+          stock,
+          riskPlan,
+          activeMasterIds,
+          (msg) => {
+            setDebateMessages((prev) => [...prev, msg]);
+            setCurrentSpeakerId(msg.speakerId);
+          },
+          (synth) => {
+            setSimulatorSynthesis(synth);
+            setIsDebateStreaming(false);
+            setCurrentSpeakerId(null);
+            setIsStreamPaused(false);
+          },
+          controller.signal,
+          undefined,
+          modeToUse,
+          (status) => {
+            setStreamStatus(status);
+            setIsStreamPaused(status.isPaused);
+          },
+          streamControlsRef
+        );
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setIsDebateStreaming(false);
+        setCurrentSpeakerId(null);
+        setIsStreamPaused(false);
+      }
+    },
+    [stock, riskPlan, activeMasterIds, debateMode]
+  );
 
   const handlePauseDebate = useCallback(() => {
     streamControlsRef.current?.pause();
@@ -259,27 +270,26 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
   };
 
   const handleCopyDebate = () => {
-    if (!round3Synthesis) return;
     const line = '==========================================';
     const text = [
       line,
-      `🏛️ TRADEGUARD MULTI-AGENT COMMITTEE REPORT: ${stock.symbol}`,
+      `🏛️ TRADEGUARD MULTI-AGENT COMMITTEE REPORT: ${normMetrics.symbol} (${normMetrics.companyName})`,
       `• Active Masters: ${activeMasterIds.map((id) => COMMITTEE_MASTERS.find((m) => m.id === id)?.name).join(', ')}`,
-      `• Verdict: ${round3Synthesis.riskControllerSignOff.verdict}`,
-      `• Consensus Stance: ${round3Synthesis.consensusStance} (Confidence: ${round3Synthesis.finalCommitteeScore}/100)`,
-      `• Enforced Whole Shares: ${round3Synthesis.riskControllerSignOff.enforcedShares} shares`,
-      `• Planned Stop-Loss Level: ₹${formatINR(round3Synthesis.riskControllerSignOff.enforcedStopLossPrice)}`,
-      `• Max Capital Loss Capped: ₹${formatINR(round3Synthesis.riskControllerSignOff.maxCapitalLossCapped)}`,
+      `• Verdict: ${jResult.verdict}`,
+      `• Consensus Stance: ${dynamicSynthesis.consensusStance} (Score: ${dynamicSynthesis.committeeScore}/100)`,
+      `• Enforced Whole Shares: ${normTradeParams.wholeShares} shares`,
+      `• Planned Stop-Loss Level: ₹${formatINR(normTradeParams.stopLoss)}`,
+      `• Max Capital Loss Capped: ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}% of capital)`,
       line,
       `📋 RISK CONTROLLER VERDICT:`,
-      `${round3Synthesis.riskControllerSignOff.verdictHeadline}`,
-      `${round3Synthesis.riskControllerSignOff.riskJustification}`,
+      `${dynamicSynthesis.verdictTitle}`,
+      `Cut the philosophy. With a ₹${formatINR(normTradeParams.budget)} budget and ${normTradeParams.wholeShares} shares, our downside exposure to stop-loss ₹${formatINR(normTradeParams.stopLoss)} is ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}% of capital). Verdict: ${jResult.verdict}.`,
       line,
-      `⚖️ KEY AGREEMENT:`,
-      `${round3Synthesis.keyAgreementSummary}`,
+      `⚖️ KEY AGREEMENTS:`,
+      ...dynamicSynthesis.keyAgreements.map((a) => `• ${a}`),
       line,
       `🔥 DISSENT & CONFLICT POINTS:`,
-      ...round3Synthesis.irreconcilableDissent.map((d) => `• ${d}`),
+      ...dynamicSynthesis.keyDissents.map((d) => `• ${d}`),
       line,
     ].join('\n');
 
@@ -318,6 +328,207 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
     );
   };
 
+  // Build dynamic perspectives fallback so Tab 1 never has empty or static 35 state
+  const effectivePerspectives: AgentPerspective[] = useMemo(() => {
+    if (round1Perspectives.length > 0) {
+      return round1Perspectives.map((p) => {
+        const masterId = ROLE_MASTER_MAP[p.agentRole];
+        const dynamicScore = dynamicSynthesis.masterScores?.[masterId] ?? p.confidenceScore;
+        return {
+          ...p,
+          confidenceScore: dynamicScore,
+        };
+      });
+    }
+
+    const sym = normMetrics.symbol;
+    const pe = normMetrics.peRatio;
+    const pb = normMetrics.pbRatio;
+    const roe = normMetrics.roe;
+    const de = normMetrics.debtToEquity;
+    const grahamNo = normMetrics.grahamNumber;
+    const mosPct =
+      grahamNo > 0
+        ? Number((((grahamNo - normMetrics.currentPrice) / grahamNo) * 100).toFixed(1))
+        : -100;
+    const isCheap = normMetrics.currentPrice <= grahamNo || pe < 22;
+    const isBuffettHigh = roe > 18;
+
+    const gScore = calculateGrahamScore(normMetrics);
+    const bScore = calculateBuffettScore(normMetrics);
+    const mScore = calculateMungerScore(normMetrics);
+
+    const out: AgentPerspective[] = [
+      {
+        agentRole: 'Value Specialist',
+        stance: gScore >= 65 ? 'Bullish' : gScore <= 40 ? 'Bearish' : 'Cautious',
+        confidenceScore: gScore,
+        coreThesis: isCheap
+          ? `At a P/E of ${pe.toFixed(1)}, ${sym} offers a rare genuine margin of safety against intrinsic value ₹${formatINR(grahamNo)}.`
+          : `Speculative madness. At ${pe.toFixed(1)}x earnings, ${sym} trades far above its liquidation and net current asset buffer.`,
+        supportingDataPoints: [
+          `Graham Number: ₹${formatINR(grahamNo)} (${mosPct >= 0 ? '+' : ''}${mosPct}% margin of safety).`,
+          `Trailing P/E: ${pe.toFixed(1)}x | P/B: ${pb.toFixed(1)}x.`,
+        ],
+        redFlags:
+          gScore < 60
+            ? [`Valuation multiple (${pe.toFixed(1)}x) exceeds conservative asset protection benchmarks.`]
+            : ['Strictly monitor for multiple expansion beyond defensive thresholds.'],
+        keyCitations: [
+          `Graham No: ₹${formatINR(grahamNo)}`,
+          `Margin of Safety: ${mosPct}%`,
+          `P/E: ${pe.toFixed(1)}x`,
+          `D/E: ${de.toFixed(2)}`,
+        ],
+        grahamAnalysis: {
+          agentId: 'graham',
+          agentName: 'Benjamin Graham',
+          score: gScore,
+          stance: gScore >= 65 ? 'BULLISH' : gScore <= 40 ? 'BEARISH' : 'NEUTRAL',
+          grahamNumber: grahamNo,
+          marginOfSafetyPct: mosPct,
+          checklist: {
+            peCheck: pe > 0 && pe <= 20,
+            pbCheck: pb > 0 && pb <= 2.5,
+            grahamMultiplierCheck: pe > 0 && pb > 0 && pe * pb <= 22.5,
+            debtCheck: de <= 1.0,
+            liquidityCheck: true,
+          },
+          thesis: isCheap
+            ? `At a P/E of ${pe.toFixed(1)}, ${sym} offers a rare genuine margin of safety against intrinsic value ₹${formatINR(grahamNo)}.`
+            : `Speculative madness. At ${pe.toFixed(1)}x earnings, ${sym} trades far above its liquidation buffer.`,
+          citations: [`P/E: ${pe.toFixed(1)}x`, `Graham Number: ₹${formatINR(grahamNo)}`],
+          redFlags: mosPct < 0 ? [`Price exceeds Graham Number by ${Math.abs(mosPct)}%`] : [],
+        },
+      },
+      {
+        agentRole: 'Growth Specialist',
+        stance: bScore >= 65 ? 'Bullish' : bScore <= 40 ? 'Bearish' : 'Neutral',
+        confidenceScore: bScore,
+        coreThesis: isBuffettHigh
+          ? `Ben, you're valuing a cigar butt. ${sym}'s ROE of ${roe.toFixed(1)}% demonstrates an authentic economic moat with durable compounding.`
+          : `I agree with Ben here. Without pricing power or high returns on capital, ${sym} lacks the protective moat we require.`,
+        supportingDataPoints: [
+          `Return on Equity (ROE): ${roe.toFixed(1)}% across business cycles.`,
+          `Economic Moat: ${isBuffettHigh ? 'WIDE' : 'NARROW'} MOAT.`,
+        ],
+        redFlags:
+          bScore < 60
+            ? [`Return on capital (${roe.toFixed(1)}%) lacks compounding durability.`]
+            : ['Watch for input cost pressures without pricing power.'],
+        keyCitations: [
+          `Moat: ${isBuffettHigh ? 'WIDE' : 'NARROW'}`,
+          `ROE: ${roe.toFixed(1)}%`,
+          `P/E: ${pe.toFixed(1)}`,
+        ],
+        buffettAnalysis: {
+          agentId: 'buffett',
+          agentName: 'Warren Buffett',
+          score: bScore,
+          stance: bScore >= 65 ? 'BULLISH' : bScore <= 40 ? 'BEARISH' : 'NEUTRAL',
+          moatStrength: isBuffettHigh ? 'WIDE' : 'NARROW',
+          pricingPowerScore: Math.min(100, Math.round((normMetrics.profitMargin / 25) * 100)),
+          checklist: {
+            roeCheck: roe >= 15.0,
+            operatingMarginCheck: normMetrics.profitMargin >= 14.0,
+            conservativeDebtCheck: de <= 0.8,
+            fcfPositiveCheck: de < 1.2,
+            valuationSanityCheck: pe <= 32.0,
+          },
+          thesis: isBuffettHigh
+            ? `Ben, you're valuing a cigar butt. ${sym}'s ROE of ${roe.toFixed(1)}% demonstrates an authentic economic moat.`
+            : `Without pricing power or high returns on capital, ${sym} lacks the protective moat we require.`,
+          citations: [`ROE: ${roe.toFixed(1)}%`],
+          redFlags: bScore < 60 ? ['Fails high return on capital hurdle'] : [],
+        },
+      },
+      {
+        agentRole: 'Quality Auditor',
+        stance: mScore >= 65 ? 'Bullish' : mScore <= 40 ? 'Bearish' : 'Cautious',
+        confidenceScore: mScore,
+        coreThesis:
+          de > 0.8
+            ? `Invert, always invert! A Debt-to-Equity of ${de.toFixed(2)} is financial arsenic if credit tightens in Dalal Street.`
+            : `Clean ledger. Minimal leverage with ${de.toFixed(2)} D/E lets us sleep soundly during market panics.`,
+        supportingDataPoints: [
+          `Solvency Audit: ${de < 0.3 ? 'PRISTINE' : de <= 1.2 ? 'ADEQUATE' : 'OVERLEVERAGED'}.`,
+          `Debt-to-Equity: ${de.toFixed(2)}.`,
+        ],
+        redFlags:
+          de > 1.2 ? [`Debt-to-Equity of ${de.toFixed(2)} introduces acute fragility.`] : [],
+        keyCitations: [`Solvency: ${de < 0.3 ? 'PRISTINE' : 'ADEQUATE'}`, `D/E: ${de.toFixed(2)}`],
+        mungerAnalysis: {
+          agentId: 'munger',
+          agentName: 'Charlie Munger',
+          score: mScore,
+          stance: mScore >= 65 ? 'BULLISH' : mScore <= 40 ? 'BEARISH' : 'NEUTRAL',
+          fragilityRating: de > 1.2 ? 'CRITICAL' : de > 0.8 ? 'MODERATE' : 'LOW',
+          solvencyStatus: de < 0.3 ? 'PRISTINE' : de <= 1.2 ? 'ADEQUATE' : 'OVERLEVERAGED',
+          checklist: {
+            noExcessiveDebtCheck: de <= 0.7,
+            interestCoverageCheck: de <= 0.9,
+            capitalDisciplineCheck: de <= 1.1,
+            inversionTestPassed: de <= 1.2,
+            valuationRationalityCheck: pe <= 35.0,
+          },
+          thesis:
+            de > 0.8
+              ? `Invert, always invert! A Debt-to-Equity of ${de.toFixed(2)} is financial arsenic if credit tightens.`
+              : `Clean ledger. Minimal leverage with ${de.toFixed(2)} D/E lets us sleep soundly during panics.`,
+          citations: [`D/E: ${de.toFixed(2)}`],
+          redFlags: de > 1.2 ? ['Elevated balance sheet fragility'] : [],
+        },
+      },
+      {
+        agentRole: 'Risk Controller',
+        stance: jResult.verdict === 'APPROVED' ? 'Bullish' : 'Bearish',
+        confidenceScore: jResult.score,
+        coreThesis: `Cut the philosophy. With a ₹${formatINR(normTradeParams.budget)} budget and ${normTradeParams.wholeShares} shares, our downside exposure to stop-loss ₹${formatINR(normTradeParams.stopLoss)} is ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}% of capital). Verdict: ${jResult.verdict}.`,
+        supportingDataPoints: [
+          `Verdict: ${jResult.verdict} • Downside Exposure: ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}% of budget).`,
+          `Stop-Loss Floor: ₹${formatINR(normTradeParams.stopLoss)} strictly enforced.`,
+        ],
+        redFlags:
+          jResult.verdict === 'VETOED'
+            ? [`Downside drawdown of ${normTradeParams.drawdownPct}% exceeds the strict 2% capital threshold.`]
+            : [],
+        keyCitations: [
+          `Verdict: ${jResult.verdict}`,
+          `Drawdown: ${normTradeParams.drawdownPct}%`,
+          `Shares: ${normTradeParams.wholeShares}`,
+        ],
+        jonesAnalysis: {
+          agentId: 'jones',
+          agentName: 'Paul Tudor Jones',
+          score: jResult.score,
+          stance: jResult.verdict === 'APPROVED' ? 'BULLISH' : 'BEARISH',
+          verdict: jResult.verdict,
+          riskRewardRatio: '1 : 2.0',
+          maxCapitalAtRisk: normTradeParams.rupeeDrawdown,
+          executionDirective:
+            jResult.verdict === 'APPROVED'
+              ? `Execute ${normTradeParams.wholeShares} whole shares at market entry. GTT stop-loss active at ₹${formatINR(normTradeParams.stopLoss)}.`
+              : 'DO NOT EXECUTE. Capital preservation rule triggered. Stand aside in cash.',
+          checklist: {
+            wholeShareCapacityCheck: normTradeParams.wholeShares > 0,
+            asymmetricRewardCheck: true,
+            lossCappedCheck: normTradeParams.drawdownPct <= 2.0,
+            liquidityCheck: true,
+            stopLossEnforcedCheck: normTradeParams.stopLoss > 0,
+          },
+          thesis: `Cut the philosophy. Downside exposure to stop-loss ₹${formatINR(normTradeParams.stopLoss)} is ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}% of capital). Verdict: ${jResult.verdict}.`,
+          citations: [
+            `Shares: ${normTradeParams.wholeShares}`,
+            `Drawdown: ₹${formatINR(normTradeParams.rupeeDrawdown)} (${normTradeParams.drawdownPct}%)`,
+          ],
+          redFlags: jResult.verdict === 'VETOED' ? ['Drawdown exceeds 2% capital limit'] : [],
+        },
+      },
+    ];
+
+    return out;
+  }, [round1Perspectives, normMetrics, normTradeParams, dynamicSynthesis, jResult]);
+
   return (
     <div
       className={`rounded-2xl border border-cyan-500/30 bg-navy-900/85 p-5 sm:p-6 shadow-2xl shadow-navy-950/80 ring-1 ring-cyan-500/20 backdrop-blur-md ${className}`}
@@ -344,7 +555,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Select iconic Market Masters to independently stress-test {stock.symbol || 'your trade'}
+              Iconic Market Masters independently stress-test {normMetrics.symbol} ({normMetrics.companyName})
             </p>
           </div>
         </div>
@@ -378,7 +589,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                   ? 'border border-cyan-400/50 bg-cyan-500/20 text-cyan-200 shadow-[0_0_15px_rgba(34,211,238,0.25)] ring-1 ring-cyan-400/30'
                   : 'text-slate-400 hover:text-slate-200 border border-transparent hover:bg-white/5'
               } ${isRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-              title="Deep 3-round 10-12 turn forensic master audit (>60s)"
+              title="Deep 3-round forensic master audit"
             >
               <span>🔬</span>
               <span>Detailed Audit</span>
@@ -393,7 +604,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               title={!hasBudget ? 'Enter budget to calculate allocation and risk limits' : undefined}
               className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-cyan-500/25 transition-all hover:from-cyan-400 hover:to-blue-500 hover:shadow-cyan-400/40 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Sparkles className="h-4 w-4" />
+              <Activity className="h-4 w-4" />
               Convene Committee ({activeMasterIds.length} Active)
             </button>
           ) : (
@@ -401,7 +612,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               {isCompleted && (
                 <button
                   onClick={handleCopyDebate}
-                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-navy-800 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-navy-750 hover:text-white"
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-navy-850 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-navy-750 hover:text-white"
                   title="Copy full committee debate"
                 >
                   {copied ? (
@@ -511,6 +722,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
       <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-3">
         {COMMITTEE_MASTERS.map((master) => {
           const isSelected = activeMasterIds.includes(master.id);
+          const score = dynamicSynthesis.masterScores?.[master.id] ?? 50;
 
           return (
             <button
@@ -544,15 +756,22 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                 )}
               </div>
 
-              {/* Master Name & Role */}
+              {/* Master Name, Role & Dynamic Score Badge */}
               <div className="min-w-0 w-full">
-                <h4
-                  className={`text-xs font-bold truncate ${
-                    isSelected ? 'text-white' : 'text-slate-400'
-                  }`}
-                >
-                  {master.name}
-                </h4>
+                <div className="flex items-center justify-center gap-1.5">
+                  <h4
+                    className={`text-xs font-bold truncate ${
+                      isSelected ? 'text-white' : 'text-slate-400'
+                    }`}
+                  >
+                    {master.name}
+                  </h4>
+                  {isSelected && (
+                    <span className="font-mono text-[10px] font-bold px-1.5 py-0.2 rounded bg-white/10 text-cyan-300 border border-white/10">
+                      {score}
+                    </span>
+                  )}
+                </div>
                 <span
                   className={`block text-[10px] font-semibold mt-0.5 truncate ${
                     isSelected ? master.badgeBg : 'text-slate-500'
@@ -596,7 +815,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
       )}
 
       {/* Interactive Stage Stepper */}
-      {(hasData || isRunning || debateMessages.length > 0) && (
+      {(hasData || isRunning || stock.currentPrice > 0) && (
         <div className="mt-5 border-b border-white/10 pb-4">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
             {/* TAB 0: Live Debate Arena */}
@@ -641,8 +860,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
             {/* TAB 1: Round 1 — Analysis */}
             <button
               onClick={() => setActiveTab('round1')}
-              disabled={round1Perspectives.length === 0}
-              className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition disabled:opacity-40 disabled:cursor-not-allowed ${
+              className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition ${
                 activeTab === 'round1'
                   ? 'border-emerald-400/60 bg-emerald-500/10 ring-1 ring-emerald-400/30'
                   : 'border-white/5 bg-navy-850/60 hover:border-white/15 hover:bg-navy-800'
@@ -664,7 +882,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                   Round 1: Analysis
                 </span>
                 <span className="block truncate text-[10px] text-slate-400">
-                  {round1Perspectives.length} Perspectives
+                  {effectivePerspectives.length} Perspectives
                 </span>
               </div>
             </button>
@@ -672,7 +890,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
             {/* TAB 2: Round 2 — Debate */}
             <button
               onClick={() => setActiveTab('round2')}
-              disabled={round2Rebuttals.length === 0}
+              disabled={activeMasterIds.length < 2}
               className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition disabled:opacity-40 disabled:cursor-not-allowed ${
                 activeTab === 'round2'
                   ? 'border-amber-400/60 bg-amber-500/10 ring-1 ring-amber-400/30'
@@ -695,7 +913,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                   Round 2: Debate
                 </span>
                 <span className="block truncate text-[10px] text-slate-400">
-                  {round2Rebuttals.length > 0 ? `${round2Rebuttals.length} Rebuttals` : 'Solo Analysis'}
+                  Cross-Examination
                 </span>
               </div>
             </button>
@@ -703,8 +921,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
             {/* TAB 3: Round 3 — Verdict */}
             <button
               onClick={() => setActiveTab('round3')}
-              disabled={!round3Synthesis}
-              className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition disabled:opacity-40 disabled:cursor-not-allowed ${
+              className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition ${
                 activeTab === 'round3'
                   ? 'border-cyan-400/60 bg-cyan-500/10 ring-1 ring-cyan-400/30'
                   : 'border-white/5 bg-navy-850/60 hover:border-white/15 hover:bg-navy-800'
@@ -725,8 +942,8 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                 >
                   Round 3: Verdict
                 </span>
-                <span className="block truncate text-[10px] text-slate-400">
-                  {isPTJActive ? 'Risk Veto & Sizing' : 'Advisory Sign-Off'}
+                <span className="block truncate text-[10px] text-slate-400 font-mono">
+                  Score: {dynamicSynthesis.committeeScore}/100
                 </span>
               </div>
             </button>
@@ -745,7 +962,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
             <h3 className="text-sm font-bold text-white">Committee Ready</h3>
             <p className="mt-1 max-w-md text-xs text-slate-400 leading-relaxed">
               Launch a live multi-agent deliberation between {activeMasterIds.length} selected Market
-              Masters to stress-test your trade thesis before order placement.
+              Masters to stress-test your trade thesis for {normMetrics.symbol} ({normMetrics.companyName}).
             </p>
 
             {/* Mode Selector in Empty State */}
@@ -779,10 +996,10 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               disabled={stock.currentPrice <= 0 || !hasBudget || activeMasterIds.length === 0}
               className="mt-2 flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-cyan-500/25 transition-all hover:from-cyan-400 hover:to-blue-500 hover:shadow-cyan-400/40 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Sparkles className="h-4 w-4" />
+              <Activity className="h-4 w-4" />
               {!hasBudget
                 ? 'Enter Budget to Convene Committee'
-                : `Convene ${debateMode === 'detailed' ? 'Detailed Audit' : 'Quick Debate'} for ${stock.symbol || 'Selected Stock'}`}
+                : `Convene ${debateMode === 'detailed' ? 'Detailed Audit' : 'Quick Debate'} for ${normMetrics.symbol}`}
             </button>
             {stock.currentPrice > 0 && !hasBudget && (
               <p className="mt-2.5 text-xs text-cyan-300 font-medium flex items-center gap-1.5">
@@ -797,7 +1014,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
         {(hasData || isRunning || debateMessages.length > 0) && activeTab === 'arena' && (
           <DebateArena
             messages={debateMessages}
-            synthesis={simulatorSynthesis}
+            synthesis={simulatorSynthesis || dynamicSynthesis}
             activeMasterIds={activeMasterIds}
             isStreaming={isDebateStreaming}
             currentSpeakerId={currentSpeakerId}
@@ -812,19 +1029,19 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
         )}
 
         {/* TAB 1: Round 1 — Independent Perspectives */}
-        {hasData && activeTab === 'round1' && (
+        {activeTab === 'round1' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-300">
-                Stage 1: Independent Specialist Perspectives
+                Stage 1: Independent Specialist Perspectives (Dynamic Scoring: 15 to 95)
               </span>
               <span className="text-[11px] text-slate-500">
-                {round1Perspectives.length} Unbiased Evaluations
+                {effectivePerspectives.length} Unbiased Evaluations
               </span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {round1Perspectives.map((p) => {
+              {effectivePerspectives.map((p) => {
                 const meta = AGENT_REGISTRY[p.agentRole];
                 const masterId = ROLE_MASTER_MAP[p.agentRole];
                 const master = COMMITTEE_MASTERS.find((m) => m.id === masterId);
@@ -866,7 +1083,8 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                             {p.stance}
                           </span>
                           <span className="font-mono text-[10px] text-slate-400">
-                            Confidence: <span className="font-bold text-white">{p.confidenceScore}%</span>
+                            Score: <span className="font-bold text-white text-xs">{p.confidenceScore}</span>
+                            <span className="text-[9px] text-slate-500">/100</span>
                           </span>
                         </div>
                       </div>
@@ -876,8 +1094,8 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                         "{p.coreThesis}"
                       </p>
 
-                      {/* Benjamin Graham Brain Quantitative Valuation Card */}
-                      {p.grahamAnalysis && (
+                      {/* Benjamin Graham Quantitative Valuation Card */}
+                      {masterId === 'graham' && (
                         <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2.5">
                           <div className="flex items-center justify-between border-b border-emerald-500/20 pb-2 mb-2">
                             <div>
@@ -885,7 +1103,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                                 Graham Number Valuation
                               </span>
                               <span className="font-mono text-sm font-bold text-white">
-                                ₹{formatINR(p.grahamAnalysis.grahamNumber)}
+                                ₹{formatINR(normMetrics.grahamNumber)}
                               </span>
                             </div>
                             <div className="text-right">
@@ -894,15 +1112,16 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                               </span>
                               <span
                                 className={`font-mono text-xs font-bold ${
-                                  p.grahamAnalysis.marginOfSafetyPct >= 0
+                                  normMetrics.currentPrice <= normMetrics.grahamNumber
                                     ? 'text-emerald-300'
-                                    : p.grahamAnalysis.marginOfSafetyPct >= -20
+                                    : normMetrics.currentPrice <= 1.5 * normMetrics.grahamNumber
                                     ? 'text-amber-300'
                                     : 'text-rose-400'
                                 }`}
                               >
-                                {p.grahamAnalysis.marginOfSafetyPct >= 0 ? '+' : ''}
-                                {p.grahamAnalysis.marginOfSafetyPct}%
+                                {normMetrics.grahamNumber > 0
+                                  ? `${Number((((normMetrics.grahamNumber - normMetrics.currentPrice) / normMetrics.grahamNumber) * 100).toFixed(1))}%`
+                                  : '-100%'}
                               </span>
                             </div>
                           </div>
@@ -910,51 +1129,53 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                           {/* 5-Rule Checklist */}
                           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.grahamAnalysis.checklist.peCheck ? (
+                              {normMetrics.peRatio < 22 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>P/E &le; 20</span>
+                              <span>P/E &lt; 22 ({normMetrics.peRatio.toFixed(1)}x)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.grahamAnalysis.checklist.pbCheck ? (
+                              {normMetrics.pbRatio < 1.5 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
-                              ) : (
+                              ) : normMetrics.pbRatio > 4.0 ? (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
+                              ) : (
+                                <span className="h-2 w-2 rounded-full bg-amber-400 shrink-0 ml-0.5" />
                               )}
-                              <span>P/B &le; 2.5</span>
+                              <span>P/B {normMetrics.pbRatio.toFixed(1)}x (Target &lt; 1.5)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.grahamAnalysis.checklist.grahamMultiplierCheck ? (
+                              {normMetrics.peRatio * normMetrics.pbRatio <= 22.5 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>P/E &times; P/B &le; 22.5</span>
+                              <span>P/E × P/B: {(normMetrics.peRatio * normMetrics.pbRatio).toFixed(1)} (≤ 22.5)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.grahamAnalysis.checklist.debtCheck ? (
+                              {normMetrics.debtToEquity <= 1.0 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>D/E &le; 1.0</span>
+                              <span>D/E ≤ 1.0 ({normMetrics.debtToEquity.toFixed(2)})</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300 col-span-2">
-                              {p.grahamAnalysis.checklist.liquidityCheck ? (
+                              {normMetrics.currentPrice <= normMetrics.grahamNumber ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
-                                <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
+                                <XCircle className="h-3 w-3 text-amber-400 shrink-0" />
                               )}
-                              <span>Current Ratio &ge; 1.2</span>
+                              <span>Price &lt; Graham Number (₹{formatINR(normMetrics.grahamNumber)})</span>
                             </div>
                           </div>
                         </div>
                       )}
 
                       {/* Warren Buffett Brain Quantitative Moat & Compounding Card */}
-                      {p.buffettAnalysis && (
+                      {masterId === 'buffett' && (
                         <div className="mb-3 rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-2.5">
                           <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2 mb-2">
                             <div>
@@ -964,14 +1185,14 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                               <div className="flex items-center gap-1.5 mt-0.5">
                                 <span
                                   className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-extrabold uppercase tracking-wide ${
-                                    p.buffettAnalysis.moatStrength === 'WIDE'
+                                    normMetrics.roe > 18
                                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                      : p.buffettAnalysis.moatStrength === 'NARROW'
+                                      : normMetrics.roe >= 12
                                       ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
                                       : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                                   }`}
                                 >
-                                  {p.buffettAnalysis.moatStrength} MOAT
+                                  {normMetrics.roe > 18 ? 'WIDE' : normMetrics.roe >= 12 ? 'NARROW' : 'NONE'} MOAT
                                 </span>
                               </div>
                             </div>
@@ -980,7 +1201,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                                 Pricing Power
                               </span>
                               <span className="font-mono text-xs font-bold text-white">
-                                {p.buffettAnalysis.pricingPowerScore}
+                                {Math.min(100, Math.round((normMetrics.profitMargin / 25) * 100))}
                                 <span className="text-[10px] text-slate-400">/100</span>
                               </span>
                             </div>
@@ -989,51 +1210,53 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                           {/* 5-Rule Buffett Checklist */}
                           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.buffettAnalysis.checklist.roeCheck ? (
+                              {normMetrics.roe > 20 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
+                              ) : normMetrics.roe > 15 ? (
+                                <span className="h-2 w-2 rounded-full bg-cyan-400 shrink-0 ml-0.5" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>ROE &ge; 15%</span>
+                              <span>ROE: {normMetrics.roe.toFixed(1)}% (Target &gt; 20%)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.buffettAnalysis.checklist.operatingMarginCheck ? (
+                              {normMetrics.profitMargin > 15 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Op Margin &ge; 14%</span>
+                              <span>Profit Margin: ~{normMetrics.profitMargin}% (&gt; 15%)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.buffettAnalysis.checklist.conservativeDebtCheck ? (
+                              {normMetrics.debtToEquity <= 0.8 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>D/E &le; 0.80</span>
+                              <span>D/E ≤ 0.80 ({normMetrics.debtToEquity.toFixed(2)})</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.buffettAnalysis.checklist.valuationSanityCheck ? (
+                              {normMetrics.peRatio <= 40 || normMetrics.roe > 30 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>P/E &le; 32 (Fair Price)</span>
+                              <span>P/E Fair Value ({normMetrics.peRatio.toFixed(1)}x)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300 col-span-2">
-                              {p.buffettAnalysis.checklist.fcfPositiveCheck ? (
+                              {normMetrics.debtToEquity < 1.2 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Positive Cash Flow Stability</span>
+                              <span>FCF & Compounding Durability</span>
                             </div>
                           </div>
                         </div>
                       )}
 
                       {/* Charlie Munger Brain Quantitative Inversion & Solvency Card */}
-                      {p.mungerAnalysis && (
+                      {masterId === 'munger' && (
                         <div className="mb-3 rounded-lg border border-blue-500/30 bg-blue-500/10 p-2.5">
                           <div className="flex items-center justify-between border-b border-blue-500/20 pb-2 mb-2">
                             <div>
@@ -1043,14 +1266,18 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                               <div className="flex items-center gap-1.5 mt-0.5">
                                 <span
                                   className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-extrabold uppercase tracking-wide ${
-                                    p.mungerAnalysis.solvencyStatus === 'PRISTINE'
+                                    normMetrics.debtToEquity < 0.3
                                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                      : p.mungerAnalysis.solvencyStatus === 'ADEQUATE'
+                                      : normMetrics.debtToEquity <= 1.2
                                       ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
                                       : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                                   }`}
                                 >
-                                  {p.mungerAnalysis.solvencyStatus}
+                                  {normMetrics.debtToEquity < 0.3
+                                    ? 'PRISTINE'
+                                    : normMetrics.debtToEquity <= 1.2
+                                    ? 'ADEQUATE'
+                                    : 'OVERLEVERAGED'}
                                 </span>
                               </div>
                             </div>
@@ -1060,14 +1287,18 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                               </span>
                               <span
                                 className={`font-mono text-xs font-bold ${
-                                  p.mungerAnalysis.fragilityRating === 'LOW'
-                                    ? 'text-emerald-300'
-                                    : p.mungerAnalysis.fragilityRating === 'MODERATE'
+                                  normMetrics.debtToEquity > 1.2
+                                    ? 'text-rose-400'
+                                    : normMetrics.debtToEquity > 0.8
                                     ? 'text-amber-300'
-                                    : 'text-rose-400'
+                                    : 'text-emerald-300'
                                 }`}
                               >
-                                {p.mungerAnalysis.fragilityRating}
+                                {normMetrics.debtToEquity > 1.2
+                                  ? 'CRITICAL'
+                                  : normMetrics.debtToEquity > 0.8
+                                  ? 'MODERATE'
+                                  : 'LOW'}
                               </span>
                             </div>
                           </div>
@@ -1075,39 +1306,41 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                           {/* 5-Rule Munger Checklist */}
                           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.mungerAnalysis.checklist.noExcessiveDebtCheck ? (
+                              {normMetrics.debtToEquity < 0.3 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
+                              ) : normMetrics.debtToEquity <= 1.2 ? (
+                                <span className="h-2 w-2 rounded-full bg-blue-400 shrink-0 ml-0.5" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>D/E &le; 0.70</span>
+                              <span>Fortress D/E: {normMetrics.debtToEquity.toFixed(2)} (&lt; 0.3)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.mungerAnalysis.checklist.interestCoverageCheck ? (
+                              {normMetrics.debtToEquity <= 1.2 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Coverage Cushion</span>
+                              <span>Inversion Risk: D/E ≤ 1.2</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.mungerAnalysis.checklist.capitalDisciplineCheck ? (
+                              {normMetrics.roe >= 15 && normMetrics.profitMargin >= 12 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
-                                <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
+                                <XCircle className="h-3 w-3 text-amber-400 shrink-0" />
                               )}
-                              <span>Capital Discipline</span>
+                              <span>Pricing Power & Stable ROE</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.mungerAnalysis.checklist.valuationRationalityCheck ? (
+                              {normMetrics.peRatio <= 35 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>P/E &le; 35 (Rational)</span>
+                              <span>Multiple Rationality (P/E ≤ 35)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300 col-span-2">
-                              {p.mungerAnalysis.checklist.inversionTestPassed ? (
+                              {normMetrics.debtToEquity <= 1.2 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
@@ -1118,8 +1351,8 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                         </div>
                       )}
 
-                      {/* Paul Tudor Jones Brain Quantitative Risk Control & Veto Card */}
-                      {p.jonesAnalysis && (
+                      {/* Paul Tudor Jones Quantitative Risk Control & Veto Card */}
+                      {masterId === 'jones' && (
                         <div className="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 p-2.5">
                           <div className="flex items-center justify-between border-b border-rose-500/20 pb-2 mb-2">
                             <div>
@@ -1129,23 +1362,25 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                               <div className="flex items-center gap-1.5 mt-0.5">
                                 <span
                                   className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-extrabold uppercase tracking-wide ${
-                                    p.jonesAnalysis.verdict === 'APPROVED'
+                                    jResult.verdict === 'APPROVED'
                                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                      : p.jonesAnalysis.verdict === 'CONDITIONAL_APPROVAL'
-                                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                                       : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                                   }`}
                                 >
-                                  {p.jonesAnalysis.verdict}
+                                  {jResult.verdict}
                                 </span>
                               </div>
                             </div>
                             <div className="text-right">
                               <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400 block">
-                                Asymmetric Payoff
+                                Capital Drawdown
                               </span>
-                              <span className="font-mono text-xs font-bold text-white">
-                                {p.jonesAnalysis.riskRewardRatio} R:R
+                              <span
+                                className={`font-mono text-xs font-bold ${
+                                  normTradeParams.drawdownPct <= 2.0 ? 'text-emerald-300' : 'text-rose-400'
+                                }`}
+                              >
+                                {normTradeParams.drawdownPct}% of Budget
                               </span>
                             </div>
                           </div>
@@ -1155,50 +1390,48 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                             <span className="text-rose-400 font-bold uppercase block text-[8px] tracking-wider mb-0.5">
                               Execution Directive
                             </span>
-                            {p.jonesAnalysis.executionDirective}
+                            {jResult.verdict === 'APPROVED'
+                              ? `Execute ${normTradeParams.wholeShares} whole shares at market entry with GTT stop-loss active at ₹${formatINR(normTradeParams.stopLoss)}.`
+                              : `DO NOT EXECUTE. Capital preservation rule triggered. Stand aside in cash reserve.`}
                           </div>
 
                           {/* 5-Rule Jones Checklist */}
                           <div className="grid grid-cols-2 gap-1.5 text-[10px]">
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.jonesAnalysis.checklist.wholeShareCapacityCheck ? (
+                              {normTradeParams.wholeShares > 0 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Whole Share Sizing</span>
+                              <span>Whole Shares: {normTradeParams.wholeShares}</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.jonesAnalysis.checklist.asymmetricRewardCheck ? (
+                              {normTradeParams.drawdownPct <= 2.0 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Asymmetry &ge; 1.5 R:R</span>
+                              <span>Max 2% Risk ({normTradeParams.drawdownPct}%)</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.jonesAnalysis.checklist.lossCappedCheck ? (
-                                <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
-                              ) : (
-                                <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
-                              )}
-                              <span>Capped Rupee Loss</span>
+                              <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
+                              <span>Loss Capped: ₹{formatINR(normTradeParams.rupeeDrawdown)}</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300">
-                              {p.jonesAnalysis.checklist.liquidityCheck ? (
+                              {normMetrics.debtToEquity <= 1.2 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Market Liquidity</span>
+                              <span>Balance Sheet Support</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-slate-300 col-span-2">
-                              {p.jonesAnalysis.checklist.stopLossEnforcedCheck ? (
+                              {normTradeParams.stopLoss > 0 ? (
                                 <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
                               ) : (
                                 <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
                               )}
-                              <span>Stop-Loss Floor Enforced</span>
+                              <span>Stop-Loss Floor: ₹{formatINR(normTradeParams.stopLoss)}</span>
                             </div>
                           </div>
                         </div>
@@ -1252,162 +1485,197 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
         )}
 
         {/* TAB 2: Round 2 — Cross-Examination Debate & Rebuttals */}
-        {hasData && activeTab === 'round2' && (
+        {activeTab === 'round2' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-300">
                 Stage 2: Cross-Examination Debate & Rebuttals
               </span>
               <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[10px] font-bold text-amber-300">
-                {round2Rebuttals.length} Active Challenges
+                Active Master Challenges
               </span>
             </div>
 
-            {round2Rebuttals.length === 0 ? (
+            {activeMasterIds.length < 2 ? (
               <div className="rounded-xl border border-white/10 bg-navy-850/50 p-6 text-center">
                 <AlertTriangle className="h-6 w-6 text-amber-400 mx-auto mb-2" />
                 <h4 className="text-xs font-bold text-white uppercase tracking-wide">
-                  Cross-Examination Skipped
+                  Cross-Examination Requires ≥ 2 Active Analysts
                 </h4>
                 <p className="mt-1 text-xs text-slate-400 max-w-md mx-auto">
-                  Only 1 analyst was selected for this committee session. Cross-examination debate requires
-                  at least 2 active masters to challenge and cross-examine theses.
+                  Select at least 2 Market Masters to run cross-examination rebuttals.
                 </p>
               </div>
             ) : (
-              <>
-                {/* Dissent & Disagreement Panel */}
-                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Flame className="h-4 w-4 text-amber-400" />
-                    <h4 className="text-xs font-bold text-amber-200 uppercase tracking-wide">
-                      Dissent & Disagreement Highlights
-                    </h4>
-                  </div>
-                  <p className="text-xs text-amber-100/90 leading-relaxed mb-3">
-                    Active analysts raised ideological and empirical challenges between forward growth,
-                    margin of safety, and downside stop-loss discipline:
-                  </p>
-                  <div className="space-y-2">
-                    {round2Rebuttals.map((r) => (
-                      <div
-                        key={r.id}
-                        className="flex items-start gap-2.5 rounded-lg border border-amber-500/20 bg-navy-950/60 p-2.5"
-                      >
-                        <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-amber-300 shrink-0">
-                          {r.disagreementFlag.conflictType}
-                        </span>
-                        <span className="text-xs text-slate-300 leading-snug">
-                          {r.disagreementFlag.summary}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Rebuttal Dialogue Cards */}
-                <div className="space-y-3">
-                  {round2Rebuttals.map((r) => {
-                    const speakerMeta = AGENT_REGISTRY[r.speakingAgent];
-                    const targetMeta = AGENT_REGISTRY[r.targetAgent];
-                    const speakerMaster = COMMITTEE_MASTERS.find(
-                      (m) => m.id === ROLE_MASTER_MAP[r.speakingAgent]
-                    );
-                    const targetMaster = COMMITTEE_MASTERS.find(
-                      (m) => m.id === ROLE_MASTER_MAP[r.targetAgent]
-                    );
-
-                    return (
-                      <div
-                        key={r.id}
-                        className="rounded-xl border border-white/10 bg-navy-850/80 p-4 transition hover:border-white/20"
-                      >
-                        {/* Speaker to Target Indicator with Avatars */}
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2.5 mb-3">
-                          <div className="flex items-center gap-3">
-                            <div className="flex items-center gap-2">
-                              {speakerMaster && renderMasterAvatar(speakerMaster, 'sm')}
-                              <div>
-                                <span className="block text-xs font-bold text-white">
-                                  {speakerMaster?.name ?? r.speakingAgent}
-                                </span>
-                                <span className={`text-[9px] font-semibold ${speakerMeta.textClass}`}>
-                                  {r.speakingAgent}
-                                </span>
-                              </div>
-                            </div>
-
-                            <ArrowRight className="h-4 w-4 text-slate-500 shrink-0" />
-
-                            <div className="flex items-center gap-2">
-                              {targetMaster && renderMasterAvatar(targetMaster, 'sm')}
-                              <div>
-                                <span className="block text-xs font-bold text-white">
-                                  {targetMaster?.name ?? r.targetAgent}
-                                </span>
-                                <span className={`text-[9px] font-semibold ${targetMeta.textClass}`}>
-                                  {r.targetAgent}
-                                </span>
-                              </div>
-                            </div>
+              <div className="space-y-3">
+                {/* Rebuttal 1: Munger vs Growth */}
+                {activeMasterIds.includes('munger') && activeMasterIds.includes('buffett') && (
+                  <div className="rounded-xl border border-white/10 bg-navy-850/80 p-4 transition hover:border-white/20">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2.5 mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          {renderMasterAvatar(COMMITTEE_MASTERS[2], 'sm')}
+                          <div>
+                            <span className="block text-xs font-bold text-white">Charlie Munger</span>
+                            <span className="text-[9px] font-semibold text-blue-400">Quality Auditor</span>
                           </div>
-
-                          <span className="rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-bold text-rose-300">
-                            {r.disagreementFlag.severity} Disagreement
-                          </span>
                         </div>
-
-                        {/* Contested Claim */}
-                        <div className="mb-2.5 rounded bg-navy-950/70 p-2 text-[11px] text-slate-400 border border-white/5">
-                          <span className="font-semibold text-slate-500 uppercase text-[9px] tracking-wider block mb-0.5">
-                            Contested Claim
-                          </span>
-                          "{r.targetClaim}"
-                        </div>
-
-                        {/* Rebuttal Text */}
-                        <div className="text-xs text-slate-200 leading-relaxed mb-3">
-                          <span className="font-semibold text-cyan-300 mr-1.5">Rebuttal:</span>
-                          {r.rebuttalArgument}
-                        </div>
-
-                        {/* Counter Evidence */}
-                        <div className="space-y-1">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
-                            Counter Evidence Presented
-                          </span>
-                          {r.counterEvidence.map((ev, idx) => (
-                            <div key={idx} className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
-                              <span className="h-1 w-1 rounded-full bg-cyan-400" />
-                              <span>{ev}</span>
-                            </div>
-                          ))}
+                        <ArrowRight className="h-4 w-4 text-slate-500 shrink-0" />
+                        <div className="flex items-center gap-2">
+                          {renderMasterAvatar(COMMITTEE_MASTERS[1], 'sm')}
+                          <div>
+                            <span className="block text-xs font-bold text-white">Warren Buffett</span>
+                            <span className="text-[9px] font-semibold text-cyan-400">Growth Specialist</span>
+                          </div>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              </>
+                      <span className="rounded border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[10px] font-bold text-rose-300">
+                        {normMetrics.debtToEquity > 0.8 ? 'Sharp Disagreement' : 'Moderate Inversion'}
+                      </span>
+                    </div>
+
+                    <div className="mb-2.5 rounded bg-navy-950/70 p-2 text-[11px] text-slate-400 border border-white/5">
+                      <span className="font-semibold text-slate-500 uppercase text-[9px] tracking-wider block mb-0.5">
+                        Contested Claim
+                      </span>
+                      "Growth Specialist projects multi-year equity compounding without accounting for debt leverage."
+                    </div>
+
+                    <div className="text-xs text-slate-200 leading-relaxed mb-3">
+                      <span className="font-semibold text-blue-300 mr-1.5">Munger Rebuttal:</span>
+                      {normMetrics.debtToEquity > 0.8
+                        ? `Invert, always invert! A Debt-to-Equity of ${normMetrics.debtToEquity.toFixed(2)} is financial arsenic if credit tightens in Dalal Street.`
+                        : `Clean ledger. Minimal leverage with ${normMetrics.debtToEquity.toFixed(2)} D/E lets us sleep soundly during market panics.`}
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                        Counter Evidence Presented
+                      </span>
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
+                        <span className="h-1 w-1 rounded-full bg-cyan-400" />
+                        <span>Debt-to-Equity: {normMetrics.debtToEquity.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Rebuttal 2: Graham vs Growth */}
+                {activeMasterIds.includes('graham') && activeMasterIds.includes('buffett') && (
+                  <div className="rounded-xl border border-white/10 bg-navy-850/80 p-4 transition hover:border-white/20">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2.5 mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          {renderMasterAvatar(COMMITTEE_MASTERS[0], 'sm')}
+                          <div>
+                            <span className="block text-xs font-bold text-white">Benjamin Graham</span>
+                            <span className="text-[9px] font-semibold text-emerald-400">Value Specialist</span>
+                          </div>
+                        </div>
+                        <ArrowRight className="h-4 w-4 text-slate-500 shrink-0" />
+                        <div className="flex items-center gap-2">
+                          {renderMasterAvatar(COMMITTEE_MASTERS[1], 'sm')}
+                          <div>
+                            <span className="block text-xs font-bold text-white">Warren Buffett</span>
+                            <span className="text-[9px] font-semibold text-cyan-400">Growth Specialist</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                        Valuation vs Growth
+                      </span>
+                    </div>
+
+                    <div className="mb-2.5 rounded bg-navy-950/70 p-2 text-[11px] text-slate-400 border border-white/5">
+                      <span className="font-semibold text-slate-500 uppercase text-[9px] tracking-wider block mb-0.5">
+                        Contested Claim
+                      </span>
+                      "Paying premium multiples for {normMetrics.symbol} is warranted by economic moat compounding."
+                    </div>
+
+                    <div className="text-xs text-slate-200 leading-relaxed mb-3">
+                      <span className="font-semibold text-emerald-300 mr-1.5">Graham Rebuttal:</span>
+                      {normMetrics.currentPrice <= normMetrics.grahamNumber || normMetrics.peRatio < 22
+                        ? `At a P/E of ${normMetrics.peRatio.toFixed(1)}, ${normMetrics.symbol} offers a rare genuine margin of safety against intrinsic value ₹${formatINR(normMetrics.grahamNumber)}.`
+                        : `Speculative madness. At ${normMetrics.peRatio.toFixed(1)}x earnings, ${normMetrics.symbol} trades far above its liquidation and net current asset buffer.`}
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                        Counter Evidence Presented
+                      </span>
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
+                        <span className="h-1 w-1 rounded-full bg-cyan-400" />
+                        <span>Current P/E: {normMetrics.peRatio.toFixed(1)}x | Graham Number: ₹${formatINR(normMetrics.grahamNumber)}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Rebuttal 3: Jones Gavel vs Specialists */}
+                {activeMasterIds.includes('jones') && (
+                  <div className="rounded-xl border border-rose-500/30 bg-navy-850/80 p-4 transition hover:border-white/20">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2.5 mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          {renderMasterAvatar(COMMITTEE_MASTERS[3], 'sm')}
+                          <div>
+                            <span className="block text-xs font-bold text-white">Paul Tudor Jones</span>
+                            <span className="text-[9px] font-semibold text-rose-400">Risk Controller</span>
+                          </div>
+                        </div>
+                        <ArrowRight className="h-4 w-4 text-slate-500 shrink-0" />
+                        <span className="text-xs text-slate-400 font-semibold">Entire Committee</span>
+                      </div>
+                      <span
+                        className={`rounded px-2 py-0.5 text-[10px] font-bold ${
+                          jResult.verdict === 'APPROVED'
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                        }`}
+                      >
+                        {jResult.verdict}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-slate-200 leading-relaxed mb-3">
+                      <span className="font-semibold text-rose-300 mr-1.5">Jones Ruling:</span>
+                      Cut the philosophy. With a ₹{formatINR(normTradeParams.budget)} budget and {normTradeParams.wholeShares} shares, our downside exposure to stop-loss ₹{formatINR(normTradeParams.stopLoss)} is ₹{formatINR(normTradeParams.rupeeDrawdown)} ({normTradeParams.drawdownPct}% of capital). Verdict: {jResult.verdict}.
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                        Enforced Execution Directive
+                      </span>
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-mono">
+                        <span className="h-1 w-1 rounded-full bg-rose-400" />
+                        <span>
+                          {jResult.verdict === 'APPROVED'
+                            ? `Authorized whole-share sizing: ${normTradeParams.wholeShares} shares. GTT Stop active at ₹${formatINR(normTradeParams.stopLoss)}.`
+                            : 'Capital preservation threshold breached. Order execution vetoed.'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         )}
 
         {/* TAB 3: Round 3 — Committee Synthesis & Risk Controller Veto */}
-        {hasData && activeTab === 'round3' && round3Synthesis && (
+        {activeTab === 'round3' && (
           <div className="space-y-5">
             {/* Risk Controller Verdict Banner */}
             {(() => {
-              const verdict = round3Synthesis.riskControllerSignOff.verdict;
+              const verdict = jResult.verdict;
               const isApproved = verdict === 'APPROVED';
-              const isConditional = verdict === 'CONDITIONAL_APPROVAL';
 
               const bannerStyles = isApproved
                 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200 ring-1 ring-emerald-500/30'
-                : isConditional
-                ? 'border-amber-500/40 bg-amber-500/10 text-amber-200 ring-1 ring-amber-500/30'
                 : 'border-rose-500/40 bg-rose-500/10 text-rose-200 ring-1 ring-rose-500/30';
 
-              const Icon = isApproved ? ShieldCheck : isConditional ? AlertTriangle : ShieldAlert;
+              const Icon = isApproved ? ShieldCheck : ShieldAlert;
               const ptjMaster = COMMITTEE_MASTERS.find((m) => m.id === 'jones');
 
               return (
@@ -1432,8 +1700,6 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                             className={`rounded-full px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide ${
                               isApproved
                                 ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/30'
-                                : isConditional
-                                ? 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30'
                                 : 'bg-rose-500/20 text-rose-300 ring-1 ring-rose-500/30'
                             }`}
                           >
@@ -1441,7 +1707,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                           </span>
                         </div>
                         <h3 className="text-base font-bold text-white mt-0.5">
-                          {round3Synthesis.riskControllerSignOff.verdictHeadline}
+                          {dynamicSynthesis.verdictTitle}
                         </h3>
                       </div>
                     </div>
@@ -1451,14 +1717,14 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                         Committee Score
                       </span>
                       <span className="font-mono text-xl font-bold text-white">
-                        {round3Synthesis.finalCommitteeScore}
+                        {dynamicSynthesis.committeeScore}
                         <span className="text-xs text-slate-500">/100</span>
                       </span>
                     </div>
                   </div>
 
-                  <p className="text-xs leading-relaxed text-slate-200 mb-4">
-                    {round3Synthesis.riskControllerSignOff.riskJustification}
+                  <p className="text-xs leading-relaxed text-slate-200 mb-4 font-mono">
+                    Cut the philosophy. With a ₹{formatINR(normTradeParams.budget)} budget and {normTradeParams.wholeShares} shares, our downside exposure to stop-loss ₹{formatINR(normTradeParams.stopLoss)} is ₹{formatINR(normTradeParams.rupeeDrawdown)} ({normTradeParams.drawdownPct}% of capital). Verdict: {verdict}.
                   </p>
 
                   {/* Enforced Parameters Grid */}
@@ -1468,7 +1734,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                         Enforced Whole Shares
                       </span>
                       <span className="font-mono text-lg font-bold text-emerald-300">
-                        {round3Synthesis.riskControllerSignOff.enforcedShares} shares
+                        {normTradeParams.wholeShares} shares
                       </span>
                     </div>
                     <div>
@@ -1476,7 +1742,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                         Mandatory Stop-Loss Floor
                       </span>
                       <span className="font-mono text-lg font-bold text-rose-400">
-                        ₹{formatINR(round3Synthesis.riskControllerSignOff.enforcedStopLossPrice)}
+                        ₹{formatINR(normTradeParams.stopLoss)}
                       </span>
                     </div>
                     <div>
@@ -1484,7 +1750,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                         Capped Rupee Loss
                       </span>
                       <span className="font-mono text-lg font-bold text-amber-300">
-                        ₹{formatINR(round3Synthesis.riskControllerSignOff.maxCapitalLossCapped)}
+                        ₹{formatINR(normTradeParams.rupeeDrawdown)}
                       </span>
                     </div>
                   </div>
@@ -1494,16 +1760,24 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
                       Enforced Execution Directives
                     </span>
-                    {round3Synthesis.riskControllerSignOff.mandatoryConditions.map((cond, idx) => (
-                      <div key={idx} className="flex items-start gap-2 text-xs text-slate-200">
-                        <Lock className="h-3.5 w-3.5 text-rose-400 shrink-0 mt-0.5" />
-                        <span>{cond}</span>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="mt-3 text-[11px] text-slate-400 italic border-t border-white/5 pt-2">
-                    {round3Synthesis.riskControllerSignOff.liquidityAssessment}
+                    <div className="flex items-start gap-2 text-xs text-slate-200">
+                      <Lock className="h-3.5 w-3.5 text-rose-400 shrink-0 mt-0.5" />
+                      <span>
+                        Execute exactly {normTradeParams.wholeShares} whole shares (₹{formatINR(normTradeParams.capitalAllocated)} capital deployed).
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2 text-xs text-slate-200">
+                      <Lock className="h-3.5 w-3.5 text-rose-400 shrink-0 mt-0.5" />
+                      <span>
+                        Mandatory stop-loss anchored at ₹{formatINR(normTradeParams.stopLoss)} (-{(normTradeParams.stopLossPct * 100).toFixed(1)}%).
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2 text-xs text-slate-200">
+                      <Lock className="h-3.5 w-3.5 text-rose-400 shrink-0 mt-0.5" />
+                      <span>
+                        Downside loss exposure strictly capped at ₹{formatINR(normTradeParams.rupeeDrawdown)} ({normTradeParams.drawdownPct}% of total trade budget).
+                      </span>
+                    </div>
                   </div>
                 </div>
               );
@@ -1519,10 +1793,10 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                   </h4>
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed mb-3">
-                  {round3Synthesis.keyAgreementSummary}
+                  {dynamicSynthesis.keyAgreements[0]}
                 </p>
                 <div className="rounded bg-navy-950/70 p-2.5 font-mono text-xs text-emerald-300 border border-white/5">
-                  Consensus Recommendation: <span className="font-bold">{round3Synthesis.consensusStance}</span>
+                  Consensus Recommendation: <span className="font-bold">{dynamicSynthesis.consensusStance}</span>
                 </div>
               </div>
 
@@ -1534,7 +1808,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                   </h4>
                 </div>
                 <ul className="space-y-2 text-xs text-slate-300">
-                  {round3Synthesis.irreconcilableDissent.map((dis, idx) => (
+                  {dynamicSynthesis.keyDissents.map((dis, idx) => (
                     <li key={idx} className="flex items-start gap-1.5">
                       <span className="text-amber-400 font-bold">•</span>
                       <span>{dis}</span>

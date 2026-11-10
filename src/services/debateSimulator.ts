@@ -1,19 +1,6 @@
 import { StockContext } from '../utils/committeeOrchestrator';
 import { RiskPlanResult } from '../utils/riskEngine';
 import { MasterId } from '../types/agents';
-import {
-  deriveStockMetricsFromContext,
-  generateGrahamFallbackAnalysis,
-} from '../agents/benjaminGraham';
-import {
-  deriveBuffettMetrics,
-  generateBuffettFallbackAnalysis,
-} from '../agents/warrenBuffett';
-import { generateMungerFallbackAnalysis } from '../agents/charlieMunger';
-import {
-  extractTradeParameters,
-  generateJonesFallbackAnalysis,
-} from '../agents/paulTudorJones';
 import { NSE_STOCKS } from '../data/nseStocks';
 
 export type DebateMode = 'quick' | 'detailed';
@@ -38,11 +25,14 @@ export interface DebateMessage {
 
 export interface CommitteeSynthesis {
   committeeScore: number;
-  consensusStance: 'STRONG BUY' | 'CAUTIOUS BUY' | 'NEUTRAL' | 'AVOID';
+  consensusStance: 'STRONG BUY' | 'CAUTIOUS BUY' | 'NEUTRAL / HOLD' | 'AVOID / HIGH RISK' | 'NEUTRAL' | 'AVOID';
   verdictTitle: string;
   verdictDetails: string;
   keyAgreements: string[];
   keyDissents: string[];
+  masterScores?: Record<MasterId, number>;
+  normalizedMetrics?: NormalizedMetrics;
+  normalizedTradeParams?: NormalizedTradeParams;
 }
 
 export interface MasterProfile {
@@ -112,7 +102,43 @@ export interface DebateStreamControls {
   isPaused: () => boolean;
 }
 
-function formatINR(val: number): string {
+export interface NormalizedMetrics {
+  symbol: string;
+  companyName: string;
+  sector: string;
+  currentPrice: number;
+  peRatio: number;
+  pbRatio: number;
+  roe: number;
+  profitMargin: number;
+  debtToEquity: number;
+  marketCap: number;
+  eps: number;
+  bookValuePerShare: number;
+  grahamNumber: number;
+}
+
+export interface NormalizedTradeParams {
+  budget: number;
+  currentPrice: number;
+  wholeShares: number;
+  stopLoss: number;
+  stopLossPct: number;
+  capitalAllocated: number;
+  unallocatedBuffer: number;
+  rupeeDrawdown: number;
+  drawdownPct: number;
+}
+
+export interface JonesScoreResult {
+  score: number;
+  verdict: 'APPROVED' | 'VETOED';
+  rupeeDrawdown: number;
+  drawdownPct: number;
+  maxAllowableDrawdown: number;
+}
+
+export function formatINR(val: number): string {
   const rounded = Number.isFinite(val) ? val : 0;
   return new Intl.NumberFormat('en-IN', {
     minimumFractionDigits: 2,
@@ -120,10 +146,478 @@ function formatINR(val: number): string {
   }).format(rounded);
 }
 
-/**
- * Generates the full transcript and synthesis of a multi-turn deliberation.
- * Supports both 'quick' mode (~4-6 turns) and 'detailed' mode (8-12 turns across 3 rounds).
- */
+// ============================================================================
+// 1. SECTOR-AWARE METRIC INGESTION & FALLBACK SAFEGUARDS
+// ============================================================================
+
+interface StockProfile {
+  pe: number;
+  pb: number;
+  roe: number;
+  debtToEquity: number;
+  profitMargin: number;
+}
+
+const SPECIFIC_STOCK_PROFILES: Record<string, StockProfile> = {
+  TCS: { pe: 28.0, pb: 7.5, roe: 36.0, debtToEquity: 0.05, profitMargin: 22.0 },
+  INFY: { pe: 26.0, pb: 6.2, roe: 31.0, debtToEquity: 0.05, profitMargin: 20.0 },
+  HCLTECH: { pe: 24.0, pb: 5.2, roe: 26.0, debtToEquity: 0.08, profitMargin: 18.0 },
+  WIPRO: { pe: 22.0, pb: 3.2, roe: 16.0, debtToEquity: 0.12, profitMargin: 14.0 },
+  TECHM: { pe: 25.0, pb: 3.6, roe: 17.0, debtToEquity: 0.10, profitMargin: 13.0 },
+  TATAELXSI: { pe: 38.0, pb: 11.5, roe: 32.0, debtToEquity: 0.02, profitMargin: 24.0 },
+  RELIANCE: { pe: 25.0, pb: 2.1, roe: 14.0, debtToEquity: 0.45, profitMargin: 11.0 },
+  TATASTEEL: { pe: 10.0, pb: 1.2, roe: 13.0, debtToEquity: 0.75, profitMargin: 9.0 },
+  JSWSTEEL: { pe: 14.0, pb: 1.8, roe: 14.0, debtToEquity: 1.10, profitMargin: 8.0 },
+  HINDALCO: { pe: 11.0, pb: 1.3, roe: 12.0, debtToEquity: 0.65, profitMargin: 7.0 },
+  COALINDIA: { pe: 8.5, pb: 2.4, roe: 45.0, debtToEquity: 0.12, profitMargin: 25.0 },
+  HDFCBANK: { pe: 18.0, pb: 2.6, roe: 16.0, debtToEquity: 0.25, profitMargin: 22.0 },
+  ICICIBANK: { pe: 17.0, pb: 2.8, roe: 18.0, debtToEquity: 0.25, profitMargin: 23.0 },
+  SBIN: { pe: 10.0, pb: 1.4, roe: 16.0, debtToEquity: 0.80, profitMargin: 15.0 },
+  KOTAKBANK: { pe: 20.0, pb: 2.8, roe: 14.0, debtToEquity: 0.20, profitMargin: 22.0 },
+  AXISBANK: { pe: 13.0, pb: 1.8, roe: 15.0, debtToEquity: 0.30, profitMargin: 18.0 },
+  HINDUNILVR: { pe: 52.0, pb: 11.0, roe: 24.0, debtToEquity: 0.04, profitMargin: 19.0 },
+  ITC: { pe: 26.0, pb: 6.8, roe: 28.0, debtToEquity: 0.03, profitMargin: 32.0 },
+  NESTLEIND: { pe: 65.0, pb: 18.0, roe: 85.0, debtToEquity: 0.15, profitMargin: 16.0 },
+  BRITANNIA: { pe: 50.0, pb: 14.0, roe: 45.0, debtToEquity: 0.40, profitMargin: 14.0 },
+  TATACONSUM: { pe: 60.0, pb: 3.5, roe: 8.0, debtToEquity: 0.15, profitMargin: 9.0 },
+  TITAN: { pe: 75.0, pb: 18.0, roe: 30.0, debtToEquity: 0.20, profitMargin: 9.0 },
+  ASIANPAINT: { pe: 50.0, pb: 12.0, roe: 25.0, debtToEquity: 0.10, profitMargin: 14.0 },
+  TATAMOTORS: { pe: 16.0, pb: 3.2, roe: 22.0, debtToEquity: 0.85, profitMargin: 8.0 },
+  MARUTI: { pe: 26.0, pb: 3.8, roe: 15.0, debtToEquity: 0.02, profitMargin: 10.0 },
+  M_AND_M: { pe: 28.0, pb: 4.2, roe: 18.0, debtToEquity: 0.35, profitMargin: 9.0 },
+  M: { pe: 28.0, pb: 4.2, roe: 18.0, debtToEquity: 0.35, profitMargin: 9.0 },
+  SUNPHARMA: { pe: 34.0, pb: 4.8, roe: 16.0, debtToEquity: 0.08, profitMargin: 20.0 },
+  CIPLA: { pe: 26.0, pb: 3.5, roe: 15.0, debtToEquity: 0.05, profitMargin: 17.0 },
+  DRREDDY: { pe: 20.0, pb: 3.2, roe: 18.0, debtToEquity: 0.06, profitMargin: 18.0 },
+  LT: { pe: 32.0, pb: 4.5, roe: 15.0, debtToEquity: 0.90, profitMargin: 8.0 },
+  NTPC: { pe: 15.0, pb: 1.9, roe: 13.0, debtToEquity: 1.35, profitMargin: 12.0 },
+  POWERGRID: { pe: 17.0, pb: 2.8, roe: 18.0, debtToEquity: 1.45, profitMargin: 28.0 },
+  TATAPOWER: { pe: 35.0, pb: 3.8, roe: 12.0, debtToEquity: 1.65, profitMargin: 7.0 },
+  ONGC: { pe: 7.5, pb: 0.9, roe: 14.0, debtToEquity: 0.45, profitMargin: 14.0 },
+  BPCL: { pe: 8.0, pb: 1.2, roe: 15.0, debtToEquity: 0.70, profitMargin: 5.0 },
+  SUZLON: { pe: 65.0, pb: 9.5, roe: 18.0, debtToEquity: 1.60, profitMargin: 8.0 },
+  ZOMATO: { pe: 85.0, pb: 6.2, roe: 7.0, debtToEquity: 0.05, profitMargin: 5.0 },
+  ADANIENT: { pe: 70.0, pb: 6.5, roe: 10.0, debtToEquity: 1.85, profitMargin: 4.0 },
+  ADANIPORTS: { pe: 32.0, pb: 4.0, roe: 14.0, debtToEquity: 1.40, profitMargin: 24.0 },
+  DLF: { pe: 48.0, pb: 3.6, roe: 8.0, debtToEquity: 0.25, profitMargin: 20.0 },
+};
+
+const SECTOR_PROFILES: Record<string, StockProfile> = {
+  'Information Technology': { pe: 28.0, pb: 6.0, roe: 28.0, debtToEquity: 0.08, profitMargin: 20.0 },
+  'Metals & Mining': { pe: 10.5, pb: 1.25, roe: 13.5, debtToEquity: 0.85, profitMargin: 9.0 },
+  'Mining & Metals': { pe: 10.5, pb: 1.25, roe: 13.5, debtToEquity: 0.85, profitMargin: 9.0 },
+  'Oil & Gas': { pe: 14.0, pb: 1.5, roe: 14.0, debtToEquity: 0.55, profitMargin: 11.0 },
+  'Oil & Gas Exploration': { pe: 8.0, pb: 1.0, roe: 14.0, debtToEquity: 0.45, profitMargin: 14.0 },
+  FMCG: { pe: 46.0, pb: 9.5, roe: 28.0, debtToEquity: 0.08, profitMargin: 18.0 },
+  'Banking & Financial': { pe: 16.5, pb: 2.2, roe: 15.5, debtToEquity: 0.35, profitMargin: 20.0 },
+  'Public Sector Bank': { pe: 10.0, pb: 1.4, roe: 16.0, debtToEquity: 0.80, profitMargin: 15.0 },
+  Automobile: { pe: 20.0, pb: 3.2, roe: 18.0, debtToEquity: 0.45, profitMargin: 9.0 },
+  Pharmaceuticals: { pe: 28.0, pb: 4.0, roe: 16.0, debtToEquity: 0.10, profitMargin: 17.0 },
+  'Power & Energy': { pe: 24.0, pb: 2.5, roe: 13.0, debtToEquity: 1.45, profitMargin: 10.0 },
+  'Power Transmission': { pe: 17.0, pb: 2.8, roe: 18.0, debtToEquity: 1.45, profitMargin: 28.0 },
+  'Power & Utilities': { pe: 15.0, pb: 1.9, roe: 13.0, debtToEquity: 1.35, profitMargin: 12.0 },
+  'Infrastructure & Capital Goods': { pe: 30.0, pb: 3.8, roe: 14.0, debtToEquity: 1.25, profitMargin: 8.0 },
+  'Consumer Discretionary': { pe: 55.0, pb: 10.0, roe: 22.0, debtToEquity: 0.20, profitMargin: 10.0 },
+  Retail: { pe: 55.0, pb: 10.0, roe: 22.0, debtToEquity: 0.20, profitMargin: 10.0 },
+  Telecommunications: { pe: 35.0, pb: 3.5, roe: 10.0, debtToEquity: 1.30, profitMargin: 10.0 },
+  'Real Estate Development': { pe: 42.0, pb: 3.2, roe: 9.0, debtToEquity: 0.45, profitMargin: 16.0 },
+  'Renewable Wind Energy': { pe: 65.0, pb: 9.5, roe: 18.0, debtToEquity: 1.60, profitMargin: 8.0 },
+  'Internet & Food Delivery': { pe: 85.0, pb: 6.2, roe: 7.0, debtToEquity: 0.05, profitMargin: 5.0 },
+  'Diversified Conglomerate': { pe: 70.0, pb: 6.5, roe: 10.0, debtToEquity: 1.85, profitMargin: 4.0 },
+};
+
+const DEFAULT_SECTOR_PROFILE: StockProfile = {
+  pe: 22.0,
+  pb: 2.5,
+  roe: 16.0,
+  debtToEquity: 0.45,
+  profitMargin: 12.0,
+};
+
+export function normalizeMetrics(stock: StockContext): NormalizedMetrics {
+  const rawSym = (stock.symbol || 'UNKNOWN').trim().toUpperCase();
+  const cleanSym = rawSym.replace(/\.(NS|BO|BSE)$/i, '').replace(/[^A-Z0-9_]/g, '');
+
+  const matchingNseStock = NSE_STOCKS.find(
+    (s) =>
+      s.displaySymbol.toUpperCase() === cleanSym ||
+      s.symbol.toUpperCase().startsWith(cleanSym) ||
+      (stock.companyName && s.name.toLowerCase().includes(stock.companyName.toLowerCase()))
+  );
+
+  const sector = matchingNseStock?.sector || 'Indian Equities';
+
+  // Base fallback from specific stock or sector
+  const specificProfile = SPECIFIC_STOCK_PROFILES[cleanSym];
+  const sectorProfile = SECTOR_PROFILES[sector] || DEFAULT_SECTOR_PROFILE;
+  const baseProfile = specificProfile || sectorProfile;
+
+  const currentPrice =
+    stock.currentPrice > 0
+      ? stock.currentPrice
+      : 100.0;
+
+  // Live P/E derivation or fallback
+  let peRatio = baseProfile.pe;
+  if (stock.marketCap && stock.netIncome && stock.marketCap > 0 && stock.netIncome > 0) {
+    const livePE = Number((stock.marketCap / stock.netIncome).toFixed(1));
+    if (livePE >= 2.0 && livePE <= 250.0) {
+      peRatio = livePE;
+    }
+  }
+
+  // Live P/B derivation or fallback
+  let pbRatio = baseProfile.pb;
+  if (stock.marketCap && stock.totalEquity && stock.marketCap > 0 && stock.totalEquity > 0) {
+    const livePB = Number((stock.marketCap / stock.totalEquity).toFixed(2));
+    if (livePB >= 0.2 && livePB <= 50.0) {
+      pbRatio = livePB;
+    }
+  }
+
+  // Live ROE derivation or fallback
+  let roe = baseProfile.roe;
+  if (stock.netIncome != null && stock.totalEquity && stock.totalEquity > 0) {
+    const liveROE = Number(((stock.netIncome / stock.totalEquity) * 100).toFixed(1));
+    if (liveROE >= -50.0 && liveROE <= 90.0) {
+      roe = liveROE;
+    }
+  }
+
+  // Live D/E derivation or fallback
+  let debtToEquity = baseProfile.debtToEquity;
+  if (stock.debtToEquity != null && Number.isFinite(stock.debtToEquity) && stock.debtToEquity >= 0) {
+    debtToEquity = stock.debtToEquity > 25.0 ? 2.50 : Number(stock.debtToEquity.toFixed(2));
+  } else if (stock.totalDebt != null && stock.totalEquity && stock.totalEquity > 0) {
+    const liveDE = Number((stock.totalDebt / stock.totalEquity).toFixed(2));
+    if (liveDE >= 0 && liveDE <= 25) {
+      debtToEquity = liveDE;
+    }
+  }
+
+  const profitMargin = baseProfile.profitMargin;
+  const marketCap = stock.marketCap && stock.marketCap > 0 ? stock.marketCap : currentPrice * 1e7;
+
+  // EPS = currentPrice / peRatio
+  const eps = peRatio > 0 ? Number((currentPrice / peRatio).toFixed(2)) : 0;
+
+  // Book Value Per Share = currentPrice / pbRatio
+  const bookValuePerShare = pbRatio > 0 ? Number((currentPrice / pbRatio).toFixed(2)) : 0;
+
+  // Graham Number Formula: Math.sqrt(22.5 * eps * bookValuePerShare) or currentPrice * (15 / peRatio) if EPS is sparse
+  let grahamNumber: number;
+  if (eps > 0 && bookValuePerShare > 0) {
+    grahamNumber = Number(Math.sqrt(22.5 * eps * bookValuePerShare).toFixed(2));
+  } else {
+    grahamNumber = Number((currentPrice * (15 / Math.max(1, peRatio))).toFixed(2));
+  }
+
+  return {
+    symbol: cleanSym || stock.symbol || 'STOCK',
+    companyName: stock.companyName || matchingNseStock?.name || cleanSym,
+    sector,
+    currentPrice,
+    peRatio,
+    pbRatio,
+    roe,
+    profitMargin,
+    debtToEquity,
+    marketCap,
+    eps,
+    bookValuePerShare,
+    grahamNumber,
+  };
+}
+
+export function normalizeTradeParams(
+  stock: StockContext,
+  riskPlan: RiskPlanResult,
+  metrics: NormalizedMetrics
+): NormalizedTradeParams {
+  const currentPrice = metrics.currentPrice;
+  const budget = riskPlan?.budget > 0 ? riskPlan.budget : 50000;
+
+  const rawShares = riskPlan?.recommendedShares;
+  const wholeShares =
+    rawShares != null && rawShares > 0
+      ? rawShares
+      : Math.floor(budget / currentPrice);
+
+  const rawStop = riskPlan?.plannedStopLossPrice;
+  const defaultStop = Number((currentPrice * 0.95).toFixed(2));
+  let stopLoss = rawStop != null && rawStop > 0 ? rawStop : defaultStop;
+
+  let stopLossPct =
+    riskPlan?.stopLossPct != null && riskPlan.stopLossPct > 0
+      ? riskPlan.stopLossPct
+      : currentPrice > 0
+      ? (currentPrice - stopLoss) / currentPrice
+      : 0.05;
+
+  // Disciplined risk normalization:
+  // For sound companies with manageable debt (D/E <= 1.2), PTJ enforces a disciplined 2% stop-loss floor
+  // capping rupee drawdown at strictly <= 2% of budget.
+  // For overleveraged companies (D/E > 1.2), downside reflects wide unhedged risk (> 2%).
+  if (metrics.debtToEquity <= 1.2 && wholeShares > 0) {
+    if (stopLossPct > 0.02) {
+      stopLoss = Number((currentPrice * 0.98).toFixed(2));
+      stopLossPct = 0.02;
+    }
+  } else if (metrics.debtToEquity > 1.2) {
+    stopLossPct = Math.max(stopLossPct, 0.06);
+    stopLoss = Number((currentPrice * (1 - stopLossPct)).toFixed(2));
+  }
+
+  const capitalAllocated = Number((wholeShares * currentPrice).toFixed(2));
+  const unallocatedBuffer = Math.max(0, Number((budget - capitalAllocated).toFixed(2)));
+
+  const rupeeDrawdown = Number(((currentPrice - stopLoss) * wholeShares).toFixed(2));
+  const drawdownPct = budget > 0 ? Number(((rupeeDrawdown / budget) * 100).toFixed(2)) : 0;
+
+  return {
+    budget,
+    currentPrice,
+    wholeShares,
+    stopLoss,
+    stopLossPct,
+    capitalAllocated,
+    unallocatedBuffer,
+    rupeeDrawdown,
+    drawdownPct,
+  };
+}
+
+// ============================================================================
+// 2. DYNAMIC, METRIC-DRIVEN MASTER SCORING ALGORITHMS (15 - 95 RANGE)
+// ============================================================================
+
+export function calculateGrahamScore(metrics: NormalizedMetrics): number {
+  let score = 50;
+
+  // P/E multiple checks
+  if (metrics.peRatio < 15) {
+    score += 25;
+  } else if (metrics.peRatio < 22) {
+    score += 10;
+  } else if (metrics.peRatio > 35) {
+    score -= 25;
+  }
+
+  // P/B ratio checks
+  if (metrics.pbRatio < 1.5) {
+    score += 15;
+  } else if (metrics.pbRatio > 4.0) {
+    score -= 20;
+  }
+
+  // Graham Number discount / premium check
+  if (metrics.currentPrice < metrics.grahamNumber) {
+    score += 10;
+  } else if (metrics.currentPrice > 1.5 * metrics.grahamNumber) {
+    score -= 20;
+  }
+
+  return Math.min(95, Math.max(15, Math.round(score)));
+}
+
+export function calculateBuffettScore(metrics: NormalizedMetrics): number {
+  let score = 50;
+
+  // ROE compounding quality
+  if (metrics.roe > 20) {
+    score += 30;
+  } else if (metrics.roe > 15) {
+    score += 15;
+  } else if (metrics.roe < 10) {
+    score -= 25;
+  }
+
+  // Sustainable profit margins
+  if (metrics.profitMargin > 15) {
+    score += 15;
+  }
+
+  // Valuation ceiling vs ROE exception
+  if (metrics.peRatio > 40 && metrics.roe <= 30) {
+    score -= 20;
+  }
+
+  return Math.min(95, Math.max(15, Math.round(score)));
+}
+
+export function calculateMungerScore(metrics: NormalizedMetrics): number {
+  let score = 50;
+
+  // Fortress balance sheet vs inversion leverage risk
+  if (metrics.debtToEquity < 0.3) {
+    score += 25;
+  } else if (metrics.debtToEquity > 1.2) {
+    score -= 35;
+  }
+
+  // Consistent ROE and pricing power intact
+  if (metrics.roe >= 15 && metrics.profitMargin >= 12) {
+    score += 15;
+  }
+
+  return Math.min(95, Math.max(15, Math.round(score)));
+}
+
+export function calculateJonesScore(
+  metrics: NormalizedMetrics,
+  tradeParams: NormalizedTradeParams
+): JonesScoreResult {
+  const maxAllowableDrawdown = tradeParams.budget * 0.02;
+
+  // Evaluates position risk: Rupee drawdown = (currentPrice - stopLoss) * wholeShares
+  // Max allowable drawdown: strictly 2% of budget
+  // If risk exceeds 2% or trend is sharply breaking support: Score = 20, issues VETOED
+  // If risk is well-hedged: Score = 85, issues APPROVED
+  const isDrawdownExcessive = tradeParams.rupeeDrawdown > maxAllowableDrawdown + 0.01;
+  const isBreakingSupportOrOverleveraged =
+    metrics.debtToEquity > 1.2 || tradeParams.wholeShares <= 0;
+
+  if (isDrawdownExcessive || isBreakingSupportOrOverleveraged) {
+    return {
+      score: 20,
+      verdict: 'VETOED',
+      rupeeDrawdown: tradeParams.rupeeDrawdown,
+      drawdownPct: tradeParams.drawdownPct,
+      maxAllowableDrawdown,
+    };
+  }
+
+  return {
+    score: 85,
+    verdict: 'APPROVED',
+    rupeeDrawdown: tradeParams.rupeeDrawdown,
+    drawdownPct: tradeParams.drawdownPct,
+    maxAllowableDrawdown,
+  };
+}
+
+export function calculateCommitteeSynthesis(
+  metrics: NormalizedMetrics,
+  tradeParams: NormalizedTradeParams,
+  activeMasterIds: MasterId[] = ['graham', 'buffett', 'munger', 'jones']
+): CommitteeSynthesis {
+  const safeActiveIds =
+    activeMasterIds.length > 0
+      ? activeMasterIds
+      : (['graham', 'buffett', 'munger', 'jones'] as MasterId[]);
+
+  const gScore = calculateGrahamScore(metrics);
+  const bScore = calculateBuffettScore(metrics);
+  const mScore = calculateMungerScore(metrics);
+  const jResult = calculateJonesScore(metrics, tradeParams);
+
+  const scores: Record<MasterId, number> = {
+    graham: gScore,
+    buffett: bScore,
+    munger: mScore,
+    jones: jResult.score,
+  };
+
+  let total = 0;
+  let count = 0;
+  for (const id of safeActiveIds) {
+    total += scores[id];
+    count++;
+  }
+
+  const rawAvg = count > 0 ? Math.round(total / count) : 60;
+  const committeeScore = Math.min(95, Math.max(15, rawAvg));
+
+  const hasJones = safeActiveIds.includes('jones');
+  const isPTJVetoed = hasJones && jResult.verdict === 'VETOED';
+
+  let consensusStance: CommitteeSynthesis['consensusStance'];
+  let verdictTitle = '';
+  let verdictDetails = '';
+
+  if (isPTJVetoed || committeeScore < 40) {
+    consensusStance = 'AVOID / HIGH RISK';
+    if (isPTJVetoed) {
+      verdictTitle = 'TRADE VETOED: Sovereign Risk Drawdown Breached';
+      verdictDetails = `Paul Tudor Jones exercised binding risk veto. Downside exposure of ₹${formatINR(
+        tradeParams.rupeeDrawdown
+      )} (${tradeParams.drawdownPct}% of capital) violates the non-negotiable 2% capital preservation threshold.`;
+    } else {
+      verdictTitle = 'AVOID / HIGH RISK: Unfavorable Valuation & Balance Sheet Skew';
+      verdictDetails = `Committee consensus rejects allocation into ${metrics.symbol}. High multiples and elevated debt-to-equity (${metrics.debtToEquity.toFixed(
+        2
+      )}) fail defensive safety hurdles.`;
+    }
+  } else if (committeeScore >= 75) {
+    consensusStance = 'STRONG BUY';
+    verdictTitle = 'STRONG BUY: High-Conviction Quality Compounder';
+    verdictDetails = `Overwhelming master alignment on ${metrics.symbol}. Robust capital returns (ROE: ${metrics.roe.toFixed(
+      1
+    )}%) combined with sound balance sheet discipline warrant disciplined execution of ${
+      tradeParams.wholeShares
+    } whole shares.`;
+  } else if (committeeScore >= 60) {
+    consensusStance = 'CAUTIOUS BUY';
+    verdictTitle = 'CAUTIOUS BUY: Sized Allocation with Strict Exit Discipline';
+    verdictDetails = `Moderate committee conviction. ${metrics.symbol} offers acceptable upside asymmetry, but valuation multiples or cyclical sensitivities require non-negotiable trailing stop-loss protection at ₹${formatINR(
+      tradeParams.stopLoss
+    )}.`;
+  } else {
+    consensusStance = 'NEUTRAL / HOLD';
+    verdictTitle = 'NEUTRAL / HOLD: Mixed Ideological Convictions';
+    verdictDetails = `Specialists are divided on ${metrics.symbol}. Tension between margin of safety requirements and forward multiple expectations warrants standing aside in cash reserve.`;
+  }
+
+  const keyAgreements: string[] = [
+    `Strict Whole-Share Allocation: Deploying capital into ${tradeParams.wholeShares} whole shares (₹${formatINR(
+      tradeParams.capitalAllocated
+    )}) with ₹${formatINR(tradeParams.unallocatedBuffer)} unallocated cash reserve.`,
+    `Stop-Loss Floor Enforced: Non-negotiable exit level at ₹${formatINR(tradeParams.stopLoss)} (-${(
+      tradeParams.stopLossPct * 100
+    ).toFixed(1)}%), strictly capping worst-case rupee drawdown at ₹${formatINR(tradeParams.rupeeDrawdown)}.`,
+    `Execution Feasibility: Liquidity in ${metrics.symbol} confirmed for order execution with low market impact slippage.`,
+  ];
+
+  const keyDissents: string[] = [];
+  if (safeActiveIds.includes('graham') && safeActiveIds.includes('buffett')) {
+    if (metrics.peRatio > 25 && metrics.roe > 18) {
+      keyDissents.push(
+        `Valuation vs Moat: Graham warns against ${metrics.peRatio.toFixed(
+          1
+        )}x P/E multiple while Buffett defends ${metrics.roe.toFixed(1)}% ROE franchise compounding.`
+      );
+    }
+  }
+  if (safeActiveIds.includes('munger') && metrics.debtToEquity > 0.8) {
+    keyDissents.push(
+      `Leverage Inversion: Munger flagged Debt-to-Equity of ${metrics.debtToEquity.toFixed(
+        2
+      )} as financial arsenic during Dalal Street liquidity shocks.`
+    );
+  }
+  if (keyDissents.length === 0) {
+    keyDissents.push(
+      `Execution Timing: Tactical debate between immediate market fill vs waiting for technical pullbacks.`
+    );
+  }
+
+  return {
+    committeeScore,
+    consensusStance,
+    verdictTitle,
+    verdictDetails,
+    keyAgreements,
+    keyDissents,
+    masterScores: scores,
+    normalizedMetrics: metrics,
+    normalizedTradeParams: tradeParams,
+  };
+}
+
+// ============================================================================
+// 3. GENERATE TRULY DYNAMIC REBUTTALS & STOCK-SPECIFIC CONTENT
+// ============================================================================
+
 export function generateDebateTranscript(
   stock: StockContext,
   riskPlan: RiskPlanResult,
@@ -135,33 +629,19 @@ export function generateDebateTranscript(
       ? activeMasterIds
       : (['graham', 'buffett', 'munger', 'jones'] as MasterId[]);
 
-  // 1. Quantitative Derivations
-  const matchingStock = NSE_STOCKS.find(
-    (s) => s.displaySymbol === stock.symbol || s.symbol === stock.symbol
-  );
-  const sector = matchingStock?.sector ?? 'Indian Equities';
-  const grahamMetrics = deriveStockMetricsFromContext(
-    stock.symbol,
-    stock.companyName,
-    stock.currentPrice,
-    stock.marketCap,
-    stock.netIncome,
-    stock.totalEquity,
-    stock.debtToEquity,
-    sector
-  );
-
-  const grahamAnalysis = generateGrahamFallbackAnalysis(grahamMetrics, riskPlan.budget);
-  const buffettMetrics = deriveBuffettMetrics(grahamMetrics, stock.netIncome, stock.totalEquity);
-  const buffettAnalysis = generateBuffettFallbackAnalysis(buffettMetrics, riskPlan.budget);
-  const mungerAnalysis = generateMungerFallbackAnalysis(grahamMetrics, riskPlan.budget);
-  const tradeParams = extractTradeParameters(riskPlan);
-  const jonesAnalysis = generateJonesFallbackAnalysis(grahamMetrics, tradeParams);
+  const metrics = normalizeMetrics(stock);
+  const tradeParams = normalizeTradeParams(stock, riskPlan, metrics);
+  const synthesis = calculateCommitteeSynthesis(metrics, tradeParams, safeActiveIds);
 
   const now = new Date();
   const formatTime = (offsetSec: number) => {
     const t = new Date(now.getTime() + offsetSec * 1000);
-    return t.toLocaleTimeString('en-IN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return t.toLocaleTimeString('en-IN', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
   };
 
   const messages: DebateMessage[] = [];
@@ -202,58 +682,66 @@ export function generateDebateTranscript(
   const hasMunger = safeActiveIds.includes('munger');
   const hasJones = safeActiveIds.includes('jones');
 
-  const sym = stock.symbol;
-  const price = stock.currentPrice;
-  const grahamNo = grahamAnalysis.grahamNumber;
-  const mos = grahamAnalysis.marginOfSafetyPct;
-  const pe = grahamMetrics.pe;
-  const pb = grahamMetrics.pb;
-  const de = grahamMetrics.debtToEquity;
-  const roe = buffettMetrics.roe;
-  const moat = buffettAnalysis.moatStrength;
-  const pricingPower = buffettAnalysis.pricingPowerScore;
-  const shares = riskPlan.recommendedShares;
-  const allocated = riskPlan.capitalAllocated;
-  const slPrice = riskPlan.plannedStopLossPrice;
-  const maxLoss = riskPlan.maxPlannedLoss;
-  const slPct = Math.round(riskPlan.stopLossPct * 100);
+  const sym = metrics.symbol;
+  const price = metrics.currentPrice;
+  const pe = metrics.peRatio;
+  const pb = metrics.pbRatio;
+  const roe = metrics.roe;
+  const de = metrics.debtToEquity;
+  const grahamNo = metrics.grahamNumber;
+  const budget = tradeParams.budget;
+  const shares = tradeParams.wholeShares;
+  const stop = tradeParams.stopLoss;
+  const lossAmount = tradeParams.rupeeDrawdown;
+  const lossPercent = tradeParams.drawdownPct;
+  const verdict = synthesis.consensusStance === 'AVOID / HIGH RISK' ? 'VETOED' : 'APPROVED';
+
+  const isGrahamCheap = price <= grahamNo || pe < 22;
+  const isBuffettHighRoe = roe > 18;
+  const isMungerHighDebt = de > 0.8;
+
+  // Exact prompt quotes
+  const grahamDialogue = isGrahamCheap
+    ? `At a P/E of ${pe.toFixed(1)}, ${sym} offers a rare genuine margin of safety against intrinsic value ₹${formatINR(grahamNo)}.`
+    : `Speculative madness. At ${pe.toFixed(1)}x earnings, ${sym} trades far above its liquidation and net current asset buffer.`;
+
+  const buffettDialogue = isBuffettHighRoe
+    ? `Ben, you're valuing a cigar butt. ${sym}'s ROE of ${roe.toFixed(1)}% demonstrates an authentic economic moat with durable compounding.`
+    : `I agree with Ben here. Without pricing power or high returns on capital, ${sym} lacks the protective moat we require.`;
+
+  const mungerDialogue = isMungerHighDebt
+    ? `Invert, always invert! A Debt-to-Equity of ${de.toFixed(2)} is financial arsenic if credit tightens in Dalal Street.`
+    : `Clean ledger. Minimal leverage with ${de.toFixed(2)} D/E lets us sleep soundly during market panics.`;
+
+  const jonesGavelDialogue = `Cut the philosophy. With a ₹${formatINR(budget)} budget and ${shares} shares, our downside exposure to stop-loss ₹${formatINR(stop)} is ₹${formatINR(lossAmount)} (${lossPercent}% of capital). Verdict: ${verdict}.`;
 
   if (mode === 'detailed') {
     // =========================================================================
-    // DETAILED ANALYSIS & DEBATE MODE (Extended 11-turn structured dialogue)
+    // DETAILED MODE (Structured 3-Round Deliberation)
     // =========================================================================
-
-    // -------------------------------------------------------------------------
-    // ROUND 1: Valuation Anchor vs. Long-Term Franchise Value
-    // -------------------------------------------------------------------------
     const r1Title = 'Round 1: Valuation Anchor vs. Long-Term Franchise Value';
 
-    // Turn 1: Graham Dissects Graham Number & Tangible Assets
+    // Turn 1: Graham Thesis
     if (hasGraham) {
-      const isUndervalued = mos > 0;
       pushMsg(
         'graham',
-        isUndervalued ? 'AGREEMENT' : 'CHALLENGE',
-        `At ₹${formatINR(price)}, ${sym} presents an entry price that demands rigorous scrutiny. With a P/E of ${pe.toFixed(1)}x against a P/B of ${pb.toFixed(1)}x, the product of multiples is ${(pe * pb).toFixed(1)} (Graham ceiling: 22.5). Our calculated Graham Number is ₹${formatINR(grahamNo)}, giving an estimated margin of safety of ${mos >= 0 ? '+' : ''}${mos}%. ${
-          isUndervalued
-            ? `The discount to intrinsic value affords a genuine defensive cushion against macroeconomic volatility.`
-            : `The market is exacting a premium over net tangible assets; without a clear margin of safety, downward shocks are structurally unprotected.`
-        }`,
+        isGrahamCheap ? 'AGREEMENT' : 'CHALLENGE',
+        `${grahamDialogue} At ₹${formatINR(price)}, ${sym} demands rigorous scrutiny against net tangible assets. Our Graham Number benchmark stands at ₹${formatINR(grahamNo)} with a P/B of ${pb.toFixed(1)}x.`,
         undefined,
         1,
         r1Title,
-        'An investment operation is one which, upon thorough analysis, promises safety of principal and an adequate return. Operations not meeting these requirements are speculative.',
+        'An investment operation is one which, upon thorough analysis, promises safety of principal and an adequate return.',
         [
+          { label: 'P/E Multiple', value: `${pe.toFixed(1)}x` },
           { label: 'Graham Number', value: `₹${formatINR(grahamNo)}` },
-          { label: 'Margin of Safety', value: `${mos}%` },
-          { label: 'P/E × P/B Product', value: `${(pe * pb).toFixed(1)}x` },
+          { label: 'P/B Multiple', value: `${pb.toFixed(1)}x` },
         ]
       );
     } else {
       pushMsg(
         'buffett',
         'DEFENSE',
-        `Analyzing ${sym} at ₹${formatINR(price)}: our primary focus is earnings durability and return on capital. With an estimated ROE of ${roe.toFixed(1)}% and a ${moat} moat (${pricingPower}/100 pricing power), this enterprise possesses compounding characteristics worth owning.`,
+        `Analyzing ${sym} at ₹${formatINR(price)}: our primary focus is return on capital and earnings durability. ${buffettDialogue}`,
         undefined,
         1,
         r1Title,
@@ -262,81 +750,78 @@ export function generateDebateTranscript(
       );
     }
 
-    // Turn 2: Buffett Counters on Indian Demographics & Moat Compounding
+    // Turn 2: Buffett Defense & Cross-Examination
     if (hasBuffett) {
       pushMsg(
         'buffett',
         'DEFENSE',
-        `Ben's margin of safety arithmetic is foundational, but static book value severely understates earning power in India's expanding economy. ${sym} generates an ROE of ${roe.toFixed(1)}% with a ${moat} moat and a ${pricingPower}/100 pricing power score. A business that can raise prices with inflation without shedding unit volume compounds capital far faster than buying cigar-butts at a discount to liquidation value.`,
+        `${buffettDialogue} Paying a fair price for a wonderful company beats paying a wonderful price for a fair company. ${sym} reinvests capital at high efficiency across India's economic expansion.`,
         hasGraham ? 'Benjamin Graham' : undefined,
         1,
         r1Title,
         "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
         [
           { label: 'Return on Equity', value: `${roe.toFixed(1)}%` },
-          { label: 'Moat Strength', value: moat },
-          { label: 'Pricing Power', value: `${pricingPower}/100` },
+          { label: 'Economic Moat', value: isBuffettHighRoe ? 'WIDE' : 'NARROW' },
+          { label: 'Profit Margin', value: `${metrics.profitMargin}%` },
         ]
       );
     }
 
-    // Turn 3: Graham Rebuttal on Margin of Safety & Earnings Surprises
+    // Turn 3: Graham Rebuttal
     if (hasGraham && hasBuffett) {
       pushMsg(
         'graham',
         'CHALLENGE',
-        `Warren, the future is always uncertain. Projecting compounding 10 years out assumes sustained operating margins and benevolent competition. When market price ₹${formatINR(price)} exceeds net tangible assets, any unexpected quarterly earnings hiccup triggers sharp multiple compression. Without an arithmetic margin of safety, you are capitalizing optimism rather than audited reality.`,
+        `Warren, the future is always uncertain. When market price ₹${formatINR(price)} trades at ${pe.toFixed(1)}x earnings without a deep discount to tangible book value ₹${formatINR(metrics.bookValuePerShare)}, unexpected macro shocks will compress multiples fast. You are capitalizing optimism rather than audited reality.`,
         'Warren Buffett',
         1,
         r1Title,
         'Confronted with a challenge to his judgment, the investor must realize that his safety consists in not paying more for a security than its quantitative value justifies.',
-        [{ label: 'Tangible P/B', value: `${pb.toFixed(1)}x` }]
+        [{ label: 'Tangible Book Value', value: `₹${formatINR(metrics.bookValuePerShare)}` }]
       );
     }
 
-    // Turn 4: Buffett Closes Round 1 on Reinvestment Economics
+    // Turn 4: Buffett Closes Round 1
     if (hasBuffett) {
       pushMsg(
         'buffett',
         'DEFENSE',
-        `We don't ignore the price, Ben; we simply recognize that time is the friend of the wonderful company and the enemy of the mediocre. If ${sym} consistently reinvests retained earnings at ${roe.toFixed(1)}% incremental returns, book value per share expands every year. Paying a moderate premium today for proven management capital allocation protects our purchasing power far better than cash.`,
+        `We do not ignore price, Ben, but time is the friend of the wonderful company and the enemy of the mediocre. If ${sym} consistently compounding equity at ${roe.toFixed(1)}% per annum, book value expands each fiscal year.`,
         hasGraham ? 'Benjamin Graham' : undefined,
         1,
         r1Title,
         'Time is the friend of the wonderful company, the enemy of the mediocre.',
-        [{ label: 'Incremental ROE', value: `${roe.toFixed(1)}%` }]
+        [{ label: 'Compounding ROE', value: `${roe.toFixed(1)}%` }]
       );
     }
 
-    // -------------------------------------------------------------------------
     // ROUND 2: Forensic Inversion & Solvency Stress-Testing
-    // -------------------------------------------------------------------------
     const r2Title = 'Round 2: Forensic Inversion & Solvency Stress-Testing';
 
-    // Turn 5: Munger Inverts the Thesis
+    // Turn 5: Munger Inversion
     if (hasMunger) {
       pushMsg(
         'munger',
-        'CHALLENGE',
-        `Let us invert our inquiry on ${sym}. Instead of hallucinating how rich we become, let's ask: How does this company go to zero in a credit freeze or an RBI rate spike? Debt-to-Equity sits at ${de.toFixed(2)}. Our Solvency Rating is ${mungerAnalysis.solvencyStatus} with Fragility scored as ${mungerAnalysis.fragilityRating}. If operating cash flow contracts by 30%, can this enterprise service its commitments without equity dilution?`,
+        isMungerHighDebt ? 'CHALLENGE' : 'AGREEMENT',
+        `${mungerDialogue} Let us invert our inquiry on ${sym}. What causes insolvency in an economic shock? Debt-to-Equity sits at ${de.toFixed(2)}. If operating cash flow contracts by 30%, can this enterprise service debt without equity dilution?`,
         undefined,
         2,
         r2Title,
         'Invert, always invert: Turn a situation or problem upside down. What happens if everything goes wrong?',
         [
           { label: 'Debt-to-Equity', value: de.toFixed(2) },
-          { label: 'Solvency Status', value: mungerAnalysis.solvencyStatus },
-          { label: 'Fragility Rating', value: mungerAnalysis.fragilityRating },
+          { label: 'Solvency Status', value: de < 0.3 ? 'PRISTINE' : de <= 1.2 ? 'ADEQUATE' : 'OVERLEVERAGED' },
         ]
       );
     }
 
-    // Turn 6: Buffett Defends Balance Sheet & FCF Conversion
+    // Turn 6: Buffett Defends Balance Sheet
     if (hasBuffett && hasMunger) {
       pushMsg(
         'buffett',
         'DEFENSE',
-        `Charlie's inversion keeps us honest. We looked closely at the debt maturity profile and working capital velocity. ${sym} converts earnings into real cash flows, not accounting smoke. With conservative debt relative to its compounding equity base, management has demonstrated financial sobriety over past market cycles.`,
+        `Charlie's inversion keeps us honest. We looked closely at ${sym}'s cash generation. With ${de <= 0.8 ? `prudent leverage of ${de.toFixed(2)} D/E, management has maintained balance sheet sobriety` : `elevated debt of ${de.toFixed(2)} D/E, debt service requires constant vigilance`}.`,
         'Charlie Munger',
         2,
         r2Title,
@@ -345,63 +830,60 @@ export function generateDebateTranscript(
       );
     }
 
-    // Turn 7: Graham Evaluates Working Capital Cushion
+    // Turn 7: Graham Audits Capital Structure
     if (hasGraham) {
-      const target = hasMunger ? 'Charlie Munger' : 'Warren Buffett';
       pushMsg(
         'graham',
         de <= 0.5 ? 'AGREEMENT' : 'CHALLENGE',
         de <= 0.5
-          ? `Charlie, I have audited the balance sheet alongside your inversion. Total debt of ₹${formatINR(stock.totalDebt ?? 0)} is well covered by tangible equity of ₹${formatINR(stock.totalEquity ?? 0)}. Debt-to-Equity of ${de.toFixed(2)} leaves the fortress intact even through an extended recession.`
+          ? `Charlie, I have audited the balance sheet alongside your inversion. Debt-to-Equity of ${de.toFixed(2)} leaves the defensive cushion intact even through an extended recession.`
           : `I share Charlie's skepticism. When Debt-to-Equity reaches ${de.toFixed(2)}, fixed financing obligations eat operating income during cyclical downturns. Debt is a multiplier on human error.`,
-        target,
+        hasMunger ? 'Charlie Munger' : 'Warren Buffett',
         2,
         r2Title,
-        'The defensive investor must confine himself to the shares of important companies with a long record of continuous dividend payments and conservative financing.',
+        'The defensive investor must confine himself to the shares of important companies with conservative financing.',
         [{ label: 'Audited D/E', value: de.toFixed(2) }]
       );
     }
 
-    // Turn 8: Munger Delivers Round 2 Forensic Verdict
+    // Turn 8: Munger Closes Round 2
     if (hasMunger) {
       pushMsg(
         'munger',
         de <= 0.8 ? 'AGREEMENT' : 'CHALLENGE',
         de <= 0.8
-          ? `The numbers confirm acceptable solvency sanity. We aren't being asked to underwrite reckless leverage. As long as we avoid idiocy and don't overpay, the company clears our forensic inversion screen.`
+          ? `The numbers confirm acceptable solvency sanity. We aren't being asked to underwrite reckless leverage. As long as we avoid stupidity and don't overpay, ${sym} clears our forensic inversion screen.`
           : `The balance sheet fails our inversion mandate. Taking financial leverage into cyclical macro headwinds is fundamentally uninvestable. Avoid stupidity rather than seeking brilliance.`,
         undefined,
         2,
         r2Title,
-        'It is remarkable how much long-term advantage people like us have gotten by trying to be consistently not stupid, instead of trying to be very intelligent.',
+        'It is remarkable how much long-term advantage people like us have gotten by trying to be consistently not stupid.',
         [{ label: 'Solvency Clearance', value: de <= 0.8 ? 'PASSED' : 'FLAGGED' }]
       );
     }
 
-    // -------------------------------------------------------------------------
     // ROUND 3: Tactical Risk Audit & Binding Gavel
-    // -------------------------------------------------------------------------
     const r3Title = 'Round 3: Tactical Risk Audit & Binding Gavel';
 
-    // Turn 9: Paul Tudor Jones Real-Time Risk Intervention
+    // Turn 9: Jones Tactical Intervention
     if (hasJones) {
       pushMsg(
         'jones',
         'CHALLENGE',
-        `Gentlemen, your economic philosophy is stimulating, but the tape does not care about your book values or 10-year discount models. The market only respects asymmetric risk. We have a specific trade budget of ₹${formatINR(riskPlan.budget)}. Sizing admits exactly ${shares} whole shares (capital deployed: ₹${formatINR(allocated)}), leaving ₹${formatINR(riskPlan.unallocatedBuffer)} unallocated in cash. Our stop-loss trigger is strictly anchored at ₹${formatINR(slPrice)} (-${slPct}%), hard-capping our worst-case loss at ₹${formatINR(maxLoss)}. Without this stop, capital allocation is forbidden.`,
+        `Gentlemen, your economic philosophy is stimulating, but the tape does not care about your book values or 10-year discount models. We have a specific trade budget of ₹${formatINR(budget)}. Sizing admits exactly ${shares} whole shares (capital deployed: ₹${formatINR(tradeParams.capitalAllocated)}), leaving ₹${formatINR(tradeParams.unallocatedBuffer)} unallocated in cash. Our stop-loss trigger is strictly anchored at ₹${formatINR(stop)} (-${(tradeParams.stopLossPct * 100).toFixed(1)}%).`,
         undefined,
         3,
         r3Title,
         "Don't focus on making money; focus on protecting what you have. Losers average losers.",
         [
-          { label: 'Position Sizing', value: `${shares} Whole Shares` },
-          { label: 'Stop-Loss Floor', value: `₹${formatINR(slPrice)} (-${slPct}%)` },
-          { label: 'Max Rupee Risk', value: `₹${formatINR(maxLoss)}` },
+          { label: 'Whole Shares', value: `${shares} Shares` },
+          { label: 'Stop-Loss Floor', value: `₹${formatINR(stop)}` },
+          { label: 'Capped Downside', value: `₹${formatINR(lossAmount)}` },
         ]
       );
     }
 
-    // Turn 10: Consensus Rebuttal & Risk Alignment
+    // Turn 10: Consensus Rebuttal
     if (hasBuffett && hasJones) {
       pushMsg(
         'buffett',
@@ -411,42 +893,38 @@ export function generateDebateTranscript(
         3,
         r3Title,
         'Risk comes from not knowing what you are doing.',
-        [{ label: 'Allocation', value: `₹${formatINR(allocated)}` }]
+        [{ label: 'Capital Deployed', value: `₹${formatINR(tradeParams.capitalAllocated)}` }]
       );
     } else if (hasMunger && hasJones) {
       pushMsg(
         'munger',
         'AGREEMENT',
-        `A mechanical stop at ₹${formatINR(slPrice)} limits catastrophe. If a position drops through technical support, admitting error quickly is the only rational course. Avoid stupidity rather than seeking brilliance.`,
+        `A mechanical stop at ₹${formatINR(stop)} limits catastrophe. If a position drops through technical support, admitting error quickly is the only rational course. Avoid stupidity rather than seeking brilliance.`,
         'Paul Tudor Jones',
         3,
         r3Title,
         'Acknowledging what you do not know is the dawning of wisdom.',
-        [{ label: 'Loss Ceiling', value: `₹${formatINR(maxLoss)}` }]
+        [{ label: 'Loss Ceiling', value: `₹${formatINR(lossAmount)}` }]
       );
     }
 
-    // Turn 11: Paul Tudor Jones Final Binding Gavel Ruling
+    // Turn 11: Paul Tudor Jones Binding Ruling
     if (hasJones) {
-      const verdict = jonesAnalysis.verdict;
-      const isApproved = verdict === 'APPROVED';
-      const isConditional = verdict === 'CONDITIONAL_APPROVAL';
-
       pushMsg(
         'jones',
         'RULING',
-        isApproved
-          ? `FINAL BINDING RULING: APPROVED. Order execution directive authorized for exactly ${shares} whole shares of ${sym} at market entry ₹${formatINR(price)}. GTT Stop-Loss floor at ₹${formatINR(slPrice)} (-${slPct}%) is active and binding. Maximum rupee capital loss strictly capped at ₹${formatINR(maxLoss)}. Risk-reward asymmetry exceeds 1:1.5 threshold. Delivery order authorized.`
-          : isConditional
-          ? `FINAL BINDING RULING: CONDITIONAL APPROVAL. Allocation permitted ONLY with trailing stop enforcement at ₹${formatINR(slPrice)}. If the stock breaks below support on heavy volume, order liquidation is mandatory without discretionary override. Max rupee loss capped at ₹${formatINR(maxLoss)}.`
-          : `FINAL BINDING RULING: VETOED BY SOVEREIGN RISK GAVEL. Downside asymmetry fails mandatory 1:1.5 criteria or whole-share thresholds. CAPITAL COMMITMENT CANCELLED. Defense takes precedence over thesis speculation. Stand aside in cash reserve.`,
+        `${jonesGavelDialogue} ${
+          verdict === 'APPROVED'
+            ? `Execution directive authorized for exactly ${shares} whole shares of ${sym} at market entry ₹${formatINR(price)}. GTT Stop-Loss floor at ₹${formatINR(stop)} is active and binding. Maximum capital loss strictly capped at ₹${formatINR(lossAmount)}. Risk-reward asymmetry validated.`
+            : `Execution cancelled. Capital preservation rule triggered. Stand aside in cash reserve.`
+        }`,
         undefined,
         3,
         r3Title,
         'Every day I assume every position I have is wrong.',
         [
           { label: 'Final Verdict', value: verdict },
-          { label: 'Risk Directive', value: isApproved ? 'EXECUTE' : isConditional ? 'CONDITIONAL' : 'VETO' },
+          { label: 'Capital at Risk', value: `${lossPercent}% of Budget` },
         ]
       );
     } else {
@@ -454,7 +932,7 @@ export function generateDebateTranscript(
       pushMsg(
         seniorId,
         'RULING',
-        `COMMITTEE ADVISORY RULING: Consensus achieved between active masters. Proceed with disciplined sizing of ${shares} whole shares of ${sym} at ₹${formatINR(price)}, observing a conservative floor at ₹${formatINR(slPrice)}.`,
+        `COMMITTEE ADVISORY RULING: Consensus achieved. Proceed with disciplined sizing of ${shares} whole shares of ${sym} at ₹${formatINR(price)}, observing a conservative floor at ₹${formatINR(stop)}.`,
         undefined,
         3,
         r3Title
@@ -462,167 +940,92 @@ export function generateDebateTranscript(
     }
   } else {
     // =========================================================================
-    // QUICK DEBATE MODE (Concise 4-7 turns, fast top-level focus)
+    // QUICK MODE (Fast 4-5 Turns with exact required quotes)
     // =========================================================================
 
-    // TURN 1: Opening Thesis & Valuation Anchor
+    // Turn 1: Graham Opening
     if (hasGraham) {
-      const isUndervalued = mos > 0;
       pushMsg(
         'graham',
-        isUndervalued ? 'AGREEMENT' : 'CHALLENGE',
-        `At ₹${formatINR(price)}, ${sym} trades at a P/E of ${pe.toFixed(1)}x and P/B of ${pb.toFixed(1)}x. Our calculated Graham Number is ₹${formatINR(grahamNo)}, yielding a margin of safety of ${mos >= 0 ? '+' : ''}${mos}%. ${
-          isUndervalued
-            ? `The discount to intrinsic value provides a defensive cushion for conservative capital.`
-            : `The market is asking a premium over net tangible assets; without a clear margin of safety, downward shocks are unprotected.`
-        }`
+        isGrahamCheap ? 'AGREEMENT' : 'CHALLENGE',
+        `${grahamDialogue} Current Price ₹${formatINR(price)} vs Graham Number ₹${formatINR(grahamNo)}.`
       );
     } else if (hasBuffett) {
       pushMsg(
         'buffett',
         'DEFENSE',
-        `Looking at ${sym} at ₹${formatINR(price)}, our primary focus is earnings durability. With an estimated ROE of ${roe.toFixed(1)}% and a ${moat} moat (${pricingPower}/100 pricing power), this enterprise possesses compounding characteristics worth owning.`
+        `Analyzing ${sym} at ₹${formatINR(price)}: ${buffettDialogue}`
       );
     } else if (hasMunger) {
       pushMsg(
         'munger',
         'CHALLENGE',
-        `Let us begin by inverting our inquiry on ${sym}. What causes permanent impairment here? Debt-to-equity is ${de.toFixed(2)}. Solvency rating is ${mungerAnalysis.solvencyStatus}. If we cannot withstand a 3-year downturn, we shouldn't touch it.`
+        `${mungerDialogue} Solvency audit for ${sym} at ₹${formatINR(price)}.`
       );
     } else if (hasJones) {
       pushMsg(
         'jones',
         'CHALLENGE',
-        `Starting with risk execution on ${sym}: Our trade budget is ₹${formatINR(riskPlan.budget)}. At ₹${formatINR(price)}, position sizing admits ${shares} whole shares (allocating ₹${formatINR(allocated)}). My mandate is simple: defense first.`
+        `Starting risk assessment on ${sym}: Budget is ₹${formatINR(budget)}, sizing ${shares} whole shares.`
       );
     }
 
-    // TURN 2: Growth Specialist Moat & Compounding Cross-Examination
-    if (hasBuffett && hasGraham) {
+    // Turn 2: Buffett Moat
+    if (hasBuffett) {
       pushMsg(
         'buffett',
         'DEFENSE',
-        `Ben's margin of safety arithmetic is legendary, but paying a fair price for a wonderful business beats paying a wonderful price for a mediocre business. ${sym} demonstrates an ROE of ${roe.toFixed(1)}% and ${moat} moat protection. Quality compounders outgrow static book value over a multi-year horizon.`,
-        'Benjamin Graham'
-      );
-    } else if (hasBuffett && !hasGraham && hasMunger) {
-      pushMsg(
-        'buffett',
-        'DEFENSE',
-        `Charlie, the balance sheet must be viewed alongside pricing power. A business that can raise prices with inflation without losing unit volume can service leverage comfortably. ${sym}'s pricing power score is ${pricingPower}/100.`,
-        'Charlie Munger'
+        `${buffettDialogue} Paying a fair price for an enduring franchise compounds far better than buying liquidation cigar butts.`,
+        hasGraham ? 'Benjamin Graham' : undefined
       );
     }
 
-    // TURN 3: Quality Auditor Inversion & Leverage Challenge
+    // Turn 3: Munger Inversion
     if (hasMunger) {
-      const target = hasBuffett ? 'Warren Buffett' : hasGraham ? 'Benjamin Graham' : undefined;
       pushMsg(
         'munger',
-        'CHALLENGE',
-        `Warren and Ben speak of compounding, but people calculate projected cash flows while ignoring balance sheet rot. Debt-to-equity of ${de.toFixed(2)} cannot be rationalized by optimistic narrative. Invert: if operating cash flow contracts by 25%, does this firm survive without diluting equity? Our Fragility Rating is ${mungerAnalysis.fragilityRating}.`,
-        target
+        isMungerHighDebt ? 'CHALLENGE' : 'AGREEMENT',
+        `${mungerDialogue} Inverting the balance sheet: if cash flows drop 25%, can ${sym} survive?`,
+        hasBuffett ? 'Warren Buffett' : hasGraham ? 'Benjamin Graham' : undefined
       );
     }
 
-    // TURN 4: Paul Tudor Jones Risk Controller Intervention & Gavel
+    // Turn 4: Jones Tactical Drawdown Drop
     if (hasJones) {
-      const isApproved = jonesAnalysis.verdict !== 'VETOED';
       pushMsg(
         'jones',
-        isApproved ? 'DEFENSE' : 'CHALLENGE',
-        `Gentlemen, your economic philosophy is intellectually stimulating, but the tape does not care about your book values. We are sizing ${shares} whole shares with ₹${formatINR(riskPlan.unallocatedBuffer)} left in cash buffer. Our mandatory stop-loss floor is set at ₹${formatINR(slPrice)} (-${slPct}%). Maximum rupee loss is capped at ₹${formatINR(maxLoss)}. Without this hard floor, the trade does not leave this room.`,
+        verdict === 'APPROVED' ? 'DEFENSE' : 'CHALLENGE',
+        jonesGavelDialogue,
         hasBuffett ? 'Warren Buffett' : 'Benjamin Graham'
       );
 
-      const verdict = jonesAnalysis.verdict;
+      // Turn 5: Jones Gavel Ruling
       pushMsg(
         'jones',
         'RULING',
-        verdict === 'APPROVED'
-          ? `FINAL RULING: APPROVED. Execution directive authorized for ${shares} whole shares of ${sym} at ₹${formatINR(price)}. Mandatory stop-loss floor ₹${formatINR(slPrice)} strictly enforced. Max capital loss capped at ₹${formatINR(maxLoss)}. Risk-reward asymmetry is validated.`
-          : verdict === 'CONDITIONAL_APPROVAL'
-          ? `FINAL RULING: CONDITIONAL APPROVAL. The position is authorized ONLY with trailing stop enforcement at ₹${formatINR(slPrice)}. If the stock breaks below support, order is liquidated instantly without discretionary override.`
-          : `FINAL RULING: VETOED. Downside skew violates 1.5:1 asymmetry. Capital allocation cancelled. Capital preservation takes precedence over thesis speculation.`
+        `FINAL RULING: ${verdict}. ${
+          verdict === 'APPROVED'
+            ? `Order execution directive authorized for ${shares} whole shares of ${sym} with mandatory stop-loss at ₹${formatINR(stop)}.`
+            : `Capital allocation cancelled. Downside exposure exceeds the 2% maximum threshold.`
+        }`
       );
     } else {
       const seniorId = hasBuffett ? 'buffett' : hasMunger ? 'munger' : 'graham';
       pushMsg(
         seniorId,
         'RULING',
-        `COMMITTEE ADVISORY RULING: Consensus achieved between active masters. Proceed with disciplined sizing of ${shares} whole shares at ₹${formatINR(price)}, observing a conservative floor at ₹${formatINR(slPrice)}.`
+        `COMMITTEE ADVISORY RULING: Consensus achieved. Sizing ${shares} whole shares at ₹${formatINR(price)}, with stop-loss at ₹${formatINR(stop)}.`
       );
     }
   }
 
-  // 3. Synthesis Calculation
-  let totalScore = 0;
-  let count = 0;
-  if (hasGraham) { totalScore += grahamAnalysis.score; count++; }
-  if (hasBuffett) { totalScore += buffettAnalysis.score; count++; }
-  if (hasMunger) { totalScore += mungerAnalysis.score; count++; }
-  if (hasJones) { totalScore += jonesAnalysis.score; count++; }
-  const avgScore = count > 0 ? Math.round(totalScore / count) : 60;
-
-  let consensusStance: CommitteeSynthesis['consensusStance'] = 'NEUTRAL';
-  let verdictTitle = '';
-  let verdictDetails = '';
-
-  if (hasJones && jonesAnalysis.verdict === 'VETOED') {
-    consensusStance = 'AVOID';
-    verdictTitle = `VETOED: Risk Controller Downside Skew Breached`;
-    verdictDetails = `Paul Tudor Jones exercised binding risk veto. While individual specialists saw merits, the capital preservation asymmetry ratio fails the mandatory 1.5:1 threshold.`;
-  } else if (avgScore >= 75) {
-    consensusStance = 'STRONG BUY';
-    verdictTitle = `STRONG CONSENSUS: Quality Compounder with Risk Floor`;
-    verdictDetails = `High alignment across committee specialists. Valuations and earnings durability warrant allocation of ${shares} whole shares with capped downside at ₹${formatINR(slPrice)}.`;
-  } else if (avgScore >= 55) {
-    consensusStance = 'CAUTIOUS BUY';
-    verdictTitle = `CONDITIONAL APPROVAL: Sized Allocation with Strict Exit`;
-    verdictDetails = `Moderate alignment. Analysts noted valuation premiums and leverage sensitivities, but trade passes risk-reward screening under strict stop-loss discipline.`;
-  } else if (avgScore >= 40) {
-    consensusStance = 'NEUTRAL';
-    verdictTitle = `NEUTRAL / HOLD: Mixed Committee Conviction`;
-    verdictDetails = `Sharp ideological conflict between margin of safety requirements and forward growth multiples. Capital allocation should remain conservative.`;
-  } else {
-    consensusStance = 'AVOID';
-    verdictTitle = `AVOID: Unfavorable Risk-Reward Multiple`;
-    verdictDetails = `Committee consensus warns against entry at current levels. Multiples are extended and balance sheet cushions are inadequate.`;
-  }
-
-  const keyAgreements: string[] = [
-    `Strict Whole-Share Sizing: Commitment limited to ${shares} shares (₹${formatINR(allocated)}) with ₹${formatINR(riskPlan.unallocatedBuffer)} unallocated cash reserve.`,
-    `Stop-Loss Floor Enforced: Non-negotiable exit level at ₹${formatINR(slPrice)} (-${slPct}%), capping maximum loss to ₹${formatINR(maxLoss)}.`,
-    `Order Book Liquidity: Execution capacity for ${shares} shares confirmed with low market impact slippage on NSE/BSE.`,
-  ];
-
-  const keyDissents: string[] = [];
-  if (hasGraham && hasBuffett && Math.abs(grahamAnalysis.score - buffettAnalysis.score) >= 15) {
-    keyDissents.push(`Valuation Anchor: Graham demands ₹${formatINR(grahamNo)} Graham Number discount while Buffett accepts premium for ${moat} moat.`);
-  }
-  if (hasMunger && de > 0.8) {
-    keyDissents.push(`Leverage Skepticism: Munger flagged Debt-to-Equity (${de.toFixed(2)}) as a fragile vulnerability under macroeconomic stress.`);
-  }
-  if (keyDissents.length === 0) {
-    keyDissents.push(`Execution Timing: Debate between immediate market order placement vs limit accumulation around key support.`);
-  }
-
-  const synthesis: CommitteeSynthesis = {
-    committeeScore: avgScore,
-    consensusStance,
-    verdictTitle,
-    verdictDetails,
-    keyAgreements,
-    keyDissents,
-  };
-
   return { messages, synthesis };
 }
 
-/**
- * Creates an interactive stream controller for the simulated debate,
- * providing Pause, Resume, Fast-Forward, and real-time elapsed duration reporting.
- */
+// ============================================================================
+// 4. STREAMING CONTROLLER
+// ============================================================================
+
 export function createDebateStream(
   stock: StockContext,
   riskPlan: RiskPlanResult,
@@ -640,7 +1043,7 @@ export function createDebateStream(
 } {
   const { messages, synthesis } = generateDebateTranscript(stock, riskPlan, activeMasterIds, mode);
   const totalTurns = messages.length;
-  const turnDelayMs = mode === 'detailed' ? 5200 : 800;
+  const turnDelayMs = mode === 'detailed' ? 4500 : 700;
   const totalEstSec = Math.round((totalTurns * turnDelayMs) / 1000);
 
   let isPaused = false;
@@ -684,10 +1087,8 @@ export function createDebateStream(
           ? 'Round 2: Forensic Inversion & Solvency Stress-Testing'
           : 'Round 3: Tactical Risk Audit & Binding Gavel');
 
-      // Deliver message
       callbacks.onMessage(msg);
 
-      // Report status
       if (callbacks.onStatusUpdate) {
         callbacks.onStatusUpdate({
           mode,
@@ -705,11 +1106,10 @@ export function createDebateStream(
         });
       }
 
-      // If not the last turn, wait for next speaker with live status updates
       if (i < totalTurns - 1) {
         const nextMsg = messages[i + 1];
         const nextSpeaker = MASTER_PROFILES[nextMsg.speakerId];
-        const nextStatus = `${nextSpeaker.name} is reviewing financial statements & formulating cross-examination...`;
+        const nextStatus = `${nextSpeaker.name} is formulating cross-examination...`;
 
         let turnElapsedMs = 0;
 
@@ -719,7 +1119,6 @@ export function createDebateStream(
           }
 
           if (isFastForward) {
-            // Immediately bypass remaining delay
             break;
           }
 
@@ -757,10 +1156,6 @@ export function createDebateStream(
   return { start, controls };
 }
 
-/**
- * Streams the simulated debate in real-time turn-by-turn with realistic pacing.
- * Preserves backwards compatibility while supporting mode, controls, and status updates.
- */
 export async function streamDebate(
   stock: StockContext,
   riskPlan: RiskPlanResult,

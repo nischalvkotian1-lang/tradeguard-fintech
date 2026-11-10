@@ -23,13 +23,11 @@ import {
   Stethoscope,
   Loader2,
   AlertCircle,
-  Sparkles,
   Info,
 } from 'lucide-react';
 import SearchCard from './components/SearchCard';
 import RiskPlanCard from './components/RiskPlanCard';
 import AgentCommitteeCard from './components/AgentCommitteeCard';
-import FinancialMentorWidget from './components/FinancialMentorWidget';
 import { RiskSettingsCard, RiskLevel } from './components/RiskSettingsCard';
 import { calculateRiskPlan, RiskPlanResult, normalizeRiskTolerance } from './utils/riskEngine';
 import { runCommitteeOrchestration, StockContext } from './utils/committeeOrchestrator';
@@ -107,6 +105,7 @@ interface FundamentalData {
   source: string;
   timestamp: string;
   notFound?: boolean;
+  error?: string;
 }
 
 type PriceFetchState = 'idle' | 'loading' | 'success' | 'error';
@@ -145,8 +144,6 @@ const CACHED_FALLBACK: Record<string, CachedFundamental> = {
   IRCTC: { marketCap: 300000000000, netIncome: 4000000000, totalDebt: 1000000000, totalEquity: 50000000000, debtToEquity: 0.02, institutionalOwnershipPct: 45, source: 'Verified Cached Data' },
   DMART: { marketCap: 400000000000, netIncome: 15000000000, totalDebt: 5000000000, totalEquity: 250000000000, debtToEquity: 0.02, institutionalOwnershipPct: 55, source: 'Verified Cached Data' },
 };
-
-
 
 function scoreFundamentals(data: Pick<FundamentalData, 'marketCap' | 'netIncome' | 'debtToEquity' | 'institutionalOwnershipPct'> & { symbol?: string }): FundamentalsHealth {
   const checks: HealthCheck[] = [];
@@ -261,7 +258,6 @@ export default function App() {
   const sym = symbol.trim().toUpperCase();
   const hasPrice = sym.length > 0 && price > 0;
   const hasBudget = capital > 0;
-  const hasValidInput = hasPrice && hasBudget;
 
   const [healthState, setHealthState] = useState<HealthFetchState>('idle');
   const [health, setHealth] = useState<FundamentalsHealth | null>(null);
@@ -338,7 +334,7 @@ export default function App() {
         clearTimeout(timeoutId);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: FundamentalData = await res.json();
-        if ((data as any).error) throw new Error((data as any).error);
+        if (data.error) throw new Error(data.error);
 
         if (data.notFound) {
           setPriceFetchState('error');
@@ -431,7 +427,7 @@ export default function App() {
         clearTimeout(timeoutId);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: FundamentalData = await res.json();
-        if ((data as any).error) throw new Error((data as any).error);
+        if (data.error) throw new Error(data.error);
 
         if (data.notFound) {
           if (cached) {
@@ -476,9 +472,7 @@ export default function App() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [sym, price]);
-
-  const isHighRisk = health?.isHighRisk ?? false;
+  }, [sym, price, liveCompany]);
 
   const riskPlan = useMemo(() => {
     return calculateRiskPlan(price, capital, normalizedTolerance, stopLossPct);
@@ -554,7 +548,7 @@ export default function App() {
     setCopied(true);
     if (copyTimer.current) clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopied(false), 2000);
-  }, [buildExecutionPlan]);
+  }, [buildExecutionPlan, capital]);
 
   const baseSym = sym.replace(/\.(NS|BO|BSE)$/, '');
   const cachedMeta = CACHED_FALLBACK[baseSym];
@@ -625,10 +619,11 @@ export default function App() {
     <div className="min-h-screen bg-navy-950 text-slate-100 grid-bg">
       <DisclaimerBanner />
 
-      <main className="mx-auto max-w-6xl px-4 pb-20 pt-10 sm:px-6 lg:px-8">
+      <main className="mx-auto max-w-6xl px-4 pb-20 pt-8 sm:px-6 lg:px-8 space-y-6">
         <Header />
 
-        <section className="mt-8 grid gap-6 lg:grid-cols-5">
+        <section className="grid gap-6 lg:grid-cols-5 items-start">
+          {/* Left Column: Ticker & Risk Parameters */}
           <div className="lg:col-span-2 space-y-6">
             <div className="relative z-30">
               <SearchCard
@@ -666,6 +661,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* Right Column: Deterministic Risk Plan, Trade Execution, & Committee Grid */}
           <div className="lg:col-span-3 space-y-6">
             <RiskPlanCard
               currentPrice={price}
@@ -696,7 +692,11 @@ export default function App() {
               onCopy={handleCopy}
               copied={copied}
               onConvene={handleConveneCommittee}
-              isCommitteeRunning={committeeStage === 'independent_analysis' || committeeStage === 'cross_examination' || committeeStage === 'synthesis_veto'}
+              isCommitteeRunning={
+                committeeStage === 'independent_analysis' ||
+                committeeStage === 'cross_examination' ||
+                committeeStage === 'synthesis_veto'
+              }
             />
             <AgentCommitteeCard
               stock={stockContext}
@@ -718,9 +718,6 @@ export default function App() {
 
         <Footer />
       </main>
-
-      {/* Floating Financial Mentor AI Assistant (Bottom-Left) */}
-      <FinancialMentorWidget currentStock={stockContext} />
     </div>
   );
 }
@@ -741,22 +738,36 @@ function DisclaimerBanner() {
 
 function Header() {
   return (
-    <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-white/10 pb-5">
       <div className="flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400/20 to-blue-600/20 ring-1 ring-cyan-400/40 glow-cyan">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-500/10 border border-cyan-500/40 text-cyan-400 glow-cyan">
           <ShieldCheck className="h-6 w-6 text-cyan-300" />
         </div>
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-white sm:text-2xl">
-            Trade<span className="text-cyan-300 text-glow-cyan">Guard</span>
-          </h1>
-          <p className="text-xs text-slate-400">India's Position Sizing & Exit Target Engine for NSE/BSE Traders</p>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-bold tracking-tight text-white sm:text-2xl font-mono">
+              TRADE<span className="text-cyan-300 text-glow-cyan">GUARD</span>
+            </h1>
+            <span className="font-mono text-[10px] bg-slate-800 border border-slate-700 text-slate-300 px-2 py-0.5 rounded">
+              QUANT-ENGINE v2.6
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 font-mono tracking-wide">
+            Institutional Quantitative Risk Controller · NSE/BSE Whole-Share Sizing & 4-Pillar Verification
+          </p>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 self-start rounded-lg bg-navy-800 px-3 py-2 ring-1 ring-white/10">
-        <span className="text-xs font-medium text-slate-400">Market</span>
-        <span className="text-sm font-bold text-cyan-300">₹ NSE / BSE</span>
+      <div className="flex items-center gap-3 font-mono text-xs">
+        <div className="flex items-center gap-2 rounded-lg bg-navy-900 border border-slate-800 px-3 py-2">
+          <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="text-slate-400">DATA FEED:</span>
+          <span className="font-bold text-cyan-300">NSE / BSE LIVE</span>
+        </div>
+        <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-navy-900 border border-slate-800 px-3 py-2 text-slate-400">
+          <span>FRAMEWORK:</span>
+          <span className="font-semibold text-slate-200">GRAHAM · BUFFETT · MUNGER · JONES</span>
+        </div>
       </div>
     </header>
   );
@@ -905,7 +916,7 @@ function FundamentalSafetyCard({
           }`}
         >
           <span className={`h-1.5 w-1.5 rounded-full ${isFallback ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
-          {isFallback ? 'Verified Cached Data' : 'Live NSE Feed'}
+          {isFallback ? 'Verified Cached Data' : (source || 'Live NSE Feed')}
         </span>
       </div>
 
@@ -1200,7 +1211,7 @@ function ResultsGrid({
         </div>
 
         {!hasBudget && (
-          <div className="mt-3.5 flex items-center gap-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200">
+          <div className="mt-3.5 flex items-center gap-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 font-mono">
             <Info className="h-4 w-4 shrink-0 text-cyan-400" />
             <span>Enter budget to calculate allocation and risk limits</span>
           </div>
@@ -1234,15 +1245,15 @@ function ResultsGrid({
           <button
             onClick={onConvene}
             disabled={!hasBudget || isCommitteeRunning}
-            className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-500/30 bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-purple-500/10 py-2.5 text-xs font-bold text-cyan-200 transition-all hover:border-cyan-400/60 hover:from-cyan-500/20 hover:to-blue-500/20 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-500/30 bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-navy-800 py-2.5 text-xs font-bold text-cyan-200 font-mono transition-all hover:border-cyan-400/60 hover:from-cyan-500/20 hover:to-blue-500/20 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Sparkles className={`h-4 w-4 text-cyan-300 ${isCommitteeRunning ? 'animate-spin' : ''}`} />
+            <Activity className={`h-4 w-4 text-cyan-300 ${isCommitteeRunning ? 'animate-spin' : ''}`} />
             <span>
               {isCommitteeRunning
                 ? 'Committee Deliberating...'
                 : !hasBudget
                 ? 'Enter Budget to Convene Committee'
-                : 'Convene Multi-Agent Committee'}
+                : 'Convene Quantitative Committee'}
             </span>
           </button>
         )}
@@ -1321,10 +1332,13 @@ function SummaryRow({ label, value, valueClass = 'text-slate-200' }: { label: st
 
 function Footer() {
   return (
-    <footer className="mt-12 border-t border-white/5 pt-6 text-center">
-      <p className="text-[11px] leading-relaxed text-slate-600">
+    <footer className="mt-12 border-t border-white/5 pt-6 text-center font-mono">
+      <p className="text-[11px] leading-relaxed text-slate-500">
+        TRADEGUARD QUANTITATIVE RISK CONTROLLER // NSE · BSE WHOLE-SHARE ADHERENCE ENGINE
+      </p>
+      <p className="text-[10px] text-slate-600 mt-1">
         TradeGuard is an educational risk-management tool. Stop-loss and risk-to-reward values are determined by
-        the selected strategy preset. Always do your own research and consult a licensed advisor before trading.
+        the selected strategy parameters. Always conduct independent verification before executing equity delivery orders.
       </p>
     </footer>
   );
