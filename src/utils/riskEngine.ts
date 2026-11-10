@@ -180,7 +180,7 @@ export function calculateRiskPlan(
       stepNumber: 2,
       title: 'Whole-Share Sizing Calculation',
       formula: 'recommendedShares = Math.floor(budget / currentPrice)',
-      explanation: 'Deploys your budget into the maximum number of whole shares possible under Indian equity delivery rules (NSE/BSE do not permit fractional shares).',
+      explanation: 'Deploys your budget into the maximum number of whole shares possible under Indian equity delivery rules (NSE does not permit fractional shares).',
       calculation: `Math.floor(₹${formatINR(safeBudget)} / ₹${formatINR(safePrice)})`,
       result: `${formatInt(recommendedShares)} whole shares`,
     },

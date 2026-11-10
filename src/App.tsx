@@ -338,7 +338,7 @@ export default function App() {
 
         if (data.notFound) {
           setPriceFetchState('error');
-          setPriceError('Symbol not found on NSE/BSE');
+          setPriceError('Symbol not found on NSE');
           setLivePrice(null);
           setLiveCompany(null);
           return;
@@ -729,7 +729,7 @@ function DisclaimerBanner() {
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
         <p className="text-xs font-medium leading-snug text-amber-200/90 sm:text-sm">
           <span className="font-semibold text-amber-300">Educational Risk Engine.</span>{' '}
-          Not SEBI Registered Advice. For NSE/BSE learning and planning purposes only.
+          Not SEBI Registered Advice. For NSE learning and planning purposes only.
         </p>
       </div>
     </div>
@@ -753,7 +753,7 @@ function Header() {
             </span>
           </div>
           <p className="text-xs text-slate-400 font-mono tracking-wide">
-            Institutional Quantitative Risk Controller · NSE/BSE Whole-Share Sizing & 4-Pillar Verification
+            Institutional Quantitative Risk Controller · NSE Whole-Share Sizing & 4-Pillar Verification
           </p>
         </div>
       </div>
@@ -762,11 +762,7 @@ function Header() {
         <div className="flex items-center gap-2 rounded-lg bg-navy-900 border border-slate-800 px-3 py-2">
           <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
           <span className="text-slate-400">DATA FEED:</span>
-          <span className="font-bold text-cyan-300">NSE / BSE LIVE</span>
-        </div>
-        <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-navy-900 border border-slate-800 px-3 py-2 text-slate-400">
-          <span>FRAMEWORK:</span>
-          <span className="font-semibold text-slate-200">GRAHAM · BUFFETT · MUNGER · JONES</span>
+          <span className="font-bold text-cyan-300">NSE LIVE</span>
         </div>
       </div>
     </header>
@@ -1334,7 +1330,7 @@ function Footer() {
   return (
     <footer className="mt-12 border-t border-white/5 pt-6 text-center font-mono">
       <p className="text-[11px] leading-relaxed text-slate-500">
-        TRADEGUARD QUANTITATIVE RISK CONTROLLER // NSE · BSE WHOLE-SHARE ADHERENCE ENGINE
+        TRADEGUARD QUANTITATIVE RISK CONTROLLER // NSE WHOLE-SHARE ADHERENCE ENGINE
       </p>
       <p className="text-[10px] text-slate-600 mt-1">
         TradeGuard is an educational risk-management tool. Stop-loss and risk-to-reward values are determined by

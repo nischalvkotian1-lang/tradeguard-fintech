@@ -152,16 +152,15 @@ export const SearchCard: React.FC<SearchCardProps> = ({
         </div>
         <div>
           <h2 className="text-sm font-semibold text-white">Step 1: Stock Setup</h2>
-          <p className="text-[11px] text-slate-500">Search NSE/BSE symbol or company name</p>
+          <p className="text-[11px] text-slate-500">Search NSE symbol or company name</p>
         </div>
       </div>
 
       <div className="space-y-4">
         {/* Autocomplete Search Input */}
         <div ref={containerRef} className="relative z-40">
-          <label className="mb-1.5 flex items-center justify-between text-xs font-medium text-slate-400">
-            <span>NSE / BSE Stock Symbol</span>
-            <span className="text-[10px] text-cyan-400/80 font-mono">Zerodha/Groww Autocomplete</span>
+          <label className="mb-1.5 block text-xs font-medium text-slate-400">
+            <span>NSE Stock Symbol</span>
           </label>
 
           <div className="relative">

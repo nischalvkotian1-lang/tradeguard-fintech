@@ -76,7 +76,7 @@ export function formatDebtRatio(de: number | null | undefined): string {
  */
 export function buildCommitteePrompt(stock: StockContext, riskPlan: RiskPlanResult): string {
   return `
-You are the TradeGuard Multi-Agent Equity Investment Committee for Indian Equities (NSE/BSE).
+You are the TradeGuard Multi-Agent Equity Investment Committee for Indian Equities (NSE).
 Your duty is to conduct a 3-Round rigorous debate on ${stock.symbol} (${stock.companyName || stock.symbol}).
 
 --- COMPANY FUNDAMENTAL DOSSIER ---

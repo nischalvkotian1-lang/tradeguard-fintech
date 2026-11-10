@@ -186,7 +186,7 @@ export const RiskPlanCard: React.FC<RiskPlanCardProps> = ({
               100% Whole-Share
             </span>
             <span className="block text-[10px] text-slate-400 mt-1 leading-tight">
-              Indian Cash Delivery (NSE/BSE)
+              Indian Cash Delivery (NSE)
             </span>
           </div>
         </div>
