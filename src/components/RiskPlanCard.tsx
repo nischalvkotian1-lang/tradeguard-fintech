@@ -44,6 +44,10 @@ function formatInt(val: number): string {
   return new Intl.NumberFormat('en-IN').format(rounded);
 }
 
+/**
+ * RiskPlanCard component renders the deterministic whole-share position sizing,
+ * planned stop-loss trigger levels, capped rupee downside, and step-by-step methodology.
+ */
 export const RiskPlanCard: React.FC<RiskPlanCardProps> = ({
   currentPrice,
   budget,
@@ -128,13 +132,18 @@ export const RiskPlanCard: React.FC<RiskPlanCardProps> = ({
       )}
 
       {/* Main Metric Spotlight: Confident Whole Shares Headline */}
-      <div className="mb-4 rounded-xl border border-emerald-500/30 bg-navy-850/95 p-4 sm:p-5 relative overflow-hidden shadow-lg shadow-black/20">
+      <div
+        role="status"
+        aria-live="polite"
+        aria-label="Deterministic Position Sizing Calculation"
+        className="mb-4 rounded-xl border border-emerald-500/30 bg-navy-850/95 p-4 sm:p-5 relative overflow-hidden shadow-lg shadow-black/20"
+      >
         <div className="absolute top-0 right-0 h-32 w-32 translate-x-8 -translate-y-8 rounded-full bg-emerald-500/10 blur-2xl pointer-events-none" />
 
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 mb-1.5">
-              <Layers className="h-4 w-4 text-emerald-400 shrink-0" />
+              <Layers className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
               <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">
                 Recommended Trade Sizing
               </span>
@@ -305,10 +314,12 @@ export const RiskPlanCard: React.FC<RiskPlanCardProps> = ({
         <button
           type="button"
           onClick={() => setIsMethodologyOpen((prev) => !prev)}
-          className="flex w-full items-center justify-between px-4 py-3 text-left transition hover:bg-white/5 focus:outline-none"
+          aria-expanded={isMethodologyOpen}
+          aria-label="Toggle calculation methodology details"
+          className="flex w-full items-center justify-between px-4 py-3 text-left transition hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 cursor-pointer"
         >
           <div className="flex items-center gap-2">
-            <Calculator className="h-4 w-4 text-emerald-400" />
+            <Calculator className="h-4 w-4 text-emerald-400" aria-hidden="true" />
             <span className="text-xs font-semibold text-slate-200">
               Calculation Methodology
             </span>

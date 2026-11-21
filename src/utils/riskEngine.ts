@@ -1,3 +1,11 @@
+import {
+  calculateWholeShares,
+  calculateCapitalAllocated,
+  calculateUnallocatedBuffer,
+  calculateStopLossPrice,
+  calculateMaxRupeeDownside,
+} from './riskMath';
+
 export type RiskTolerance = 'Low' | 'Medium' | 'High' | 'Custom';
 
 export interface RiskAllocationConfig {
@@ -139,24 +147,24 @@ export function calculateRiskPlan(
     recommendedShares = 0;
     alertMessage = `Whole share threshold not met: Total budget of ₹${formatINR(safeBudget)} is less than the current share price of ₹${formatINR(safePrice)}. Minimum ₹${formatINR(safePrice)} required to purchase 1 whole share.`;
   } else {
-    // recommendedShares = Math.floor(budget / currentPrice)
-    recommendedShares = Math.floor(safeBudget / safePrice);
+    // Pure calculation from riskMath
+    recommendedShares = calculateWholeShares(safeBudget, safePrice);
   }
 
   const maxWholeShares = recommendedShares;
 
-  // capitalAllocated = recommendedShares * currentPrice
-  const capitalAllocated = Number((recommendedShares * safePrice).toFixed(2));
+  // Capital deployed into whole shares via riskMath
+  const capitalAllocated = calculateCapitalAllocated(recommendedShares, safePrice);
 
-  // unallocatedBuffer = budget - capitalAllocated (fractional share remainder)
-  const unallocatedBuffer = Number((safeBudget - capitalAllocated).toFixed(2));
+  // Fractional share buffer via riskMath
+  const unallocatedBuffer = calculateUnallocatedBuffer(safeBudget, capitalAllocated);
 
-  // plannedStopLossPrice = Number((currentPrice * (1 - stopLossPct)).toFixed(2))
-  const plannedStopLossPrice = safePrice > 0 ? Number((safePrice * (1 - stopLossPct)).toFixed(2)) : 0;
+  // Planned stop-loss price level via riskMath
+  const plannedStopLossPrice = calculateStopLossPrice(safePrice, stopLossPct);
 
-  // maxPlannedLoss = Number((recommendedShares * (currentPrice - plannedStopLossPrice)).toFixed(2))
+  // Maximum rupee downside capital at risk via riskMath
   const riskPerShare = safePrice > 0 ? Number((safePrice - plannedStopLossPrice).toFixed(2)) : 0;
-  const maxPlannedLoss = Number((recommendedShares * riskPerShare).toFixed(2));
+  const maxPlannedLoss = calculateMaxRupeeDownside(recommendedShares, safePrice, plannedStopLossPrice);
 
   const capitalAllocatedPct = safeBudget > 0 ? Number(((capitalAllocated / safeBudget) * 100).toFixed(1)) : 0;
   const unallocatedBufferPct = safeBudget > 0 ? Number(((unallocatedBuffer / safeBudget) * 100).toFixed(1)) : 0;

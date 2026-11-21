@@ -82,6 +82,24 @@ export const MASTER_ROLE_MAP: Record<MasterId, AgentRole> = {
   jones: 'Risk Controller',
 };
 
+/**
+ * Returns descriptive, WCAG-compliant alt text for each Market Master portrait.
+ */
+export function getMasterPillarAlt(id: MasterId | string): string {
+  switch (id) {
+    case 'graham':
+      return 'Benjamin Graham - Valuation Pillar';
+    case 'buffett':
+      return 'Warren Buffett - Compounding Pillar';
+    case 'munger':
+      return 'Charlie Munger - Quality Pillar';
+    case 'jones':
+      return 'Paul Tudor Jones - Risk Management Pillar';
+    default:
+      return 'Market Master - Investment Pillar';
+  }
+}
+
 export const ROLE_MASTER_MAP: Record<AgentRole, MasterId> = {
   'Value Specialist': 'graham',
   'Growth Specialist': 'buffett',

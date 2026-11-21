@@ -79,6 +79,10 @@ function formatInt(val: number): string {
   return new Intl.NumberFormat('en-IN').format(rounded);
 }
 
+/**
+ * RiskSettingsCard component provides trade capital budgeting with whole-share
+ * allocation presets, unified risk tolerance tiers, and dynamic stop-loss adjustments.
+ */
 export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
   capitalRaw,
   setCapitalRaw,
@@ -97,29 +101,42 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
     ? Number((livePrice * (1 - stopLossPct / 100)).toFixed(2))
     : null;
 
+  /**
+   * Strictly sanitizes budget input: strips non-digits, prevents negative values,
+   * enforces a sane upper bound (max ₹10 Crore / 100,000,000), and avoids NaN/Infinity.
+   */
   const handleCapitalChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
-    // Allow the user to backspace and clear the input completely
     if (raw === '') {
       setCapitalRaw('');
       return;
     }
 
-    // Strip non-numeric characters (handles pasting e.g. "₹50,000" or "50,000")
     const digitsOnly = raw.replace(/[^0-9]/g, '');
     if (digitsOnly === '') {
       setCapitalRaw('');
       return;
     }
 
-    // Prevent forced leading zeros while allowing single '0'
-    const formatted = digitsOnly.replace(/^0+(?=\d)/, '');
-    setCapitalRaw(formatted);
+    // Strip leading zeroes while allowing '0'
+    const cleanNumStr = digitsOnly.replace(/^0+(?=\d)/, '');
+    const num = parseInt(cleanNumStr, 10);
+
+    // Enforce sane upper bound of ₹10,00,00,000 (10 Cr)
+    const MAX_BUDGET = 100000000;
+    if (num > MAX_BUDGET) {
+      setCapitalRaw(String(MAX_BUDGET));
+      return;
+    }
+
+    setCapitalRaw(cleanNumStr);
   };
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
-    onStopLossChange(val);
+    if (Number.isFinite(val) && val >= 1.0 && val <= 20.0) {
+      onStopLossChange(val);
+    }
   };
 
   return (
@@ -129,11 +146,11 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
       {/* Header Label */}
       <div className="mb-4 flex items-center gap-2.5">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 ring-1 ring-emerald-500/20">
-          <Shield className="h-4 w-4 text-emerald-400" />
+          <Shield className="h-4 w-4 text-emerald-400" aria-hidden="true" />
         </div>
         <div>
           <h2 className="text-sm font-semibold text-white">Step 2: Budget & Risk Settings</h2>
-          <p className="text-[11px] text-slate-500">
+          <p id="budget-helper-text" className="text-[11px] text-slate-400">
             Define your capital, risk tolerance, and stop-loss buffer
           </p>
         </div>
@@ -142,35 +159,39 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
       <div className="space-y-5">
         {/* Section 1: Total Budget */}
         <div>
-          <label className="mb-1.5 flex items-center justify-between text-xs font-medium text-slate-400">
+          <label htmlFor="budget-input" className="mb-1.5 flex items-center justify-between text-xs font-medium text-slate-300">
             <span>Trade Capital Allocation ({currency})</span>
             <span className="text-[10px] text-emerald-400/90 font-mono">100% Deployed into Whole Shares</span>
           </label>
 
           <div className="relative">
-            <Wallet className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            <Wallet className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden="true" />
             {capitalRaw !== '' && (
               <span className="pointer-events-none absolute left-9 top-1/2 -translate-y-1/2 font-mono text-sm font-semibold text-slate-400">
                 {currency}
               </span>
             )}
             <input
+              id="budget-input"
               value={capitalRaw}
               onChange={handleCapitalChange}
               inputMode="numeric"
+              aria-label={`Trade Capital Allocation in ${currency}`}
+              aria-describedby="budget-helper-text"
               placeholder={`Enter your investment capital (e.g. ${currency}50,000)`}
               className={`w-full rounded-lg border border-white/10 bg-navy-850 py-2.5 ${
                 capitalRaw !== '' ? 'pl-[50px]' : 'pl-10'
-              } pr-9 font-mono text-sm font-semibold text-white focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 transition-all placeholder:font-sans placeholder:font-normal placeholder:text-xs sm:placeholder:text-sm placeholder:text-slate-500`}
+              } pr-9 font-mono text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400 transition-all placeholder:font-sans placeholder:font-normal placeholder:text-xs sm:placeholder:text-sm placeholder:text-slate-500`}
             />
             {capitalRaw !== '' && (
               <button
                 type="button"
                 onClick={() => setCapitalRaw('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-500 hover:bg-white/10 hover:text-slate-300 transition"
+                aria-label="Clear capital allocation budget"
+                className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 hover:bg-white/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition"
                 title="Clear budget"
               >
-                <X className="h-3.5 w-3.5" />
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             )}
           </div>
@@ -185,10 +206,11 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
                   key={preset.value}
                   type="button"
                   onClick={() => setCapitalRaw(String(preset.value))}
-                  className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                  aria-label={`Set capital to ${currency}${formatInt(preset.value)}`}
+                  className={`rounded-lg border px-3 py-1.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition ${
                     active
                       ? 'border-emerald-400/70 bg-emerald-400/15 text-emerald-200 ring-1 ring-emerald-400/30 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
-                      : 'border-white/10 bg-navy-850 text-slate-400 hover:border-white/20 hover:bg-navy-800 hover:text-slate-200'
+                      : 'border-white/10 bg-navy-850 text-slate-300 hover:border-white/20 hover:bg-navy-800 hover:text-slate-100'
                   }`}
                   title={`Set capital to ${currency}${formatInt(preset.value)}`}
                 >
@@ -202,9 +224,9 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
         {/* Section 2: Unified Risk Profile */}
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <label className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
-              <span>Risk Profile</span>
-            </label>
+            <span className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+              Risk Profile
+            </span>
             {riskLevel === 'custom' && (
               <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
                 Custom Stop-Loss Active
@@ -221,7 +243,8 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
                   key={profile.key}
                   type="button"
                   onClick={() => onSelectRiskLevel(profile.key)}
-                  className={`relative rounded-xl border p-2.5 text-left transition-all duration-200 ${
+                  aria-pressed={active}
+                  className={`relative rounded-xl border p-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-all duration-200 ${
                     active
                       ? 'border-emerald-500/70 bg-emerald-500/15 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/40 text-white'
                       : 'border-white/10 bg-navy-850 hover:border-white/20 hover:bg-navy-800 text-slate-300'
@@ -237,16 +260,16 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
                     </span>
                     {active ? (
                       <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-400 text-navy-950">
-                        <Check className="h-2.5 w-2.5 stroke-[3]" />
+                        <Check className="h-2.5 w-2.5 stroke-[3]" aria-hidden="true" />
                       </span>
                     ) : (
-                      <span className="text-[10px] text-slate-500">{profile.badge}</span>
+                      <span className="text-[10px] text-slate-400">{profile.badge}</span>
                     )}
                   </div>
                   <div className="text-[11px] font-medium text-slate-200 leading-snug">
                     {profile.displayText}
                   </div>
-                  <div className="mt-1 text-[10px] font-mono text-slate-500 flex items-center justify-between">
+                  <div className="mt-1 text-[10px] font-mono text-slate-400 flex items-center justify-between">
                     <span>1:{profile.rrRatio} Target</span>
                     <span className="text-emerald-400 font-semibold">100% Deployed</span>
                   </div>
@@ -260,8 +283,8 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
         <div className="rounded-xl border border-white/10 bg-navy-850/80 p-3.5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5">
             <div className="flex items-center gap-1.5">
-              <Sliders className="h-3.5 w-3.5 text-emerald-400" />
-              <label className="text-xs font-medium text-slate-300">
+              <Sliders className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+              <label htmlFor="stop-loss-slider" className="text-xs font-medium text-slate-300">
                 Stop-Loss Protection
               </label>
             </div>
@@ -281,13 +304,15 @@ export const RiskSettingsCard: React.FC<RiskSettingsCardProps> = ({
           {/* Slider input */}
           <div className="relative pt-1">
             <input
+              id="stop-loss-slider"
               type="range"
               min={1.0}
               max={15.0}
               step={0.5}
               value={stopLossPct}
               onChange={handleSliderChange}
-              className="w-full h-2 bg-navy-950 rounded-lg appearance-none cursor-pointer accent-emerald-400 focus:outline-none ring-1 ring-white/10"
+              aria-label="Stop-loss percentage"
+              className="w-full h-2 bg-navy-950 rounded-lg appearance-none cursor-pointer accent-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ring-1 ring-white/10"
             />
 
             {/* Slider Scale Ticks */}

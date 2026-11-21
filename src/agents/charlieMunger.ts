@@ -1,4 +1,5 @@
 import { StockMetrics } from './benjaminGraham';
+import { checkMungerSolvency } from '../utils/riskMath';
 
 export interface MungerAnalysisResult {
   agentId: 'munger';
@@ -30,10 +31,9 @@ export function evaluateMungerMetrics(metrics: StockMetrics): {
 } {
   const { pe, debtToEquity, currentRatio } = metrics;
 
-  // 1. Inversion & Forensic Solvency Checks
+  // 1. Inversion & Forensic Solvency Checks via riskMath
   const noExcessiveDebtCheck = debtToEquity <= 0.7;
-  const solvencyStatus: MungerAnalysisResult['solvencyStatus'] =
-    debtToEquity <= 0.5 ? 'PRISTINE' : debtToEquity <= 1.0 ? 'ADEQUATE' : 'OVERLEVERAGED';
+  const solvencyStatus: MungerAnalysisResult['solvencyStatus'] = checkMungerSolvency(debtToEquity);
 
   const interestCoverageCheck = debtToEquity <= 0.9 && (currentRatio || 1.4) >= 1.2;
   const capitalDisciplineCheck = debtToEquity <= 1.1;

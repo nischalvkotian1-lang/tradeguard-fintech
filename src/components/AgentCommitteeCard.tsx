@@ -29,6 +29,7 @@ import {
   CommitteeMaster,
   COMMITTEE_MASTERS,
   ROLE_MASTER_MAP,
+  getMasterPillarAlt,
 } from '../types/agents';
 import { RiskPlanResult } from '../utils/riskEngine';
 import { StockContext } from '../utils/committeeOrchestrator';
@@ -320,7 +321,7 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
     return (
       <img
         src={master.avatarUrl}
-        alt={master.name}
+        alt={getMasterPillarAlt(master.id)}
         referrerPolicy="no-referrer"
         onError={() => handleImgError(master.id)}
         className={`${sizeClasses} shrink-0 rounded-full object-cover object-top border ${master.borderColor} shadow-inner bg-navy-950`}
@@ -698,15 +699,38 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
 
           {isPTJActive ? (
             <div className="flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-medium text-rose-300">
-              <ShieldCheck className="h-3.5 w-3.5 text-rose-400" />
+              <ShieldCheck className="h-3.5 w-3.5 text-rose-400" aria-hidden="true" />
               <span>PTJ Binding Veto: Active</span>
             </div>
           ) : (
             <div className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-300">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
               <span>No PTJ Veto (Advisory Only)</span>
             </div>
           )}
+
+          {/* Dynamic Committee Verdict Status */}
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="verdict-banner-pill"
+            aria-label={`Committee Verdict: ${jResult.verdict === 'APPROVED' ? 'APPROVED' : 'BLOCKED / VETOED'}`}
+            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider ${
+              jResult.verdict === 'APPROVED'
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30'
+                : 'border-rose-500/40 bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30'
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                jResult.verdict === 'APPROVED' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'
+              }`}
+              aria-hidden="true"
+            />
+            <span>
+              VERDICT: {jResult.verdict === 'APPROVED' ? 'APPROVED' : 'BLOCKED / VETOED'}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -730,7 +754,10 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               onClick={() => handleToggleMaster(master.id)}
               disabled={isRunning}
               type="button"
-              className={`relative flex flex-col items-center p-3.5 rounded-xl border transition-all text-center select-none ${
+              data-testid={`committee-card-${master.id}`}
+              aria-label={`Select ${master.name} - ${getMasterPillarAlt(master.id)}`}
+              aria-pressed={isSelected}
+              className={`relative flex flex-col items-center p-3.5 rounded-xl border transition-all text-center select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                 isSelected
                   ? `bg-navy-800/80 ${master.borderColor} ring-1 ring-white/10 shadow-lg`
                   : 'bg-navy-950/40 border-white/5 hover:bg-navy-900/40 hover:border-white/20'
@@ -740,18 +767,18 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               <div className="relative mb-2.5">
                 <img
                   src={master.avatarUrl}
-                  alt={master.name}
+                  alt={getMasterPillarAlt(master.id)}
                   className={`w-14 h-14 rounded-full object-cover border-2 shadow-md ${
                     MASTER_ACTIVE_BORDERS[master.id]
                   } ${!isSelected ? 'grayscale opacity-40' : ''}`}
                 />
                 {isSelected ? (
                   <div className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-navy-950 shadow-md ring-2 ring-navy-900 transition-colors">
-                    <Check className="h-3 w-3 stroke-[3]" />
+                    <Check className="h-3 w-3 stroke-[3]" aria-hidden="true" />
                   </div>
                 ) : (
                   <div className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-white/10 text-slate-400 border border-white/10 transition-colors">
-                    <Plus className="h-3 w-3" />
+                    <Plus className="h-3 w-3" aria-hidden="true" />
                   </div>
                 )}
               </div>
@@ -1679,14 +1706,20 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
               const ptjMaster = COMMITTEE_MASTERS.find((m) => m.id === 'jones');
 
               return (
-                <div className={`rounded-xl border p-5 ${bannerStyles}`}>
+                <div
+                  role="status"
+                  aria-live="polite"
+                  data-testid="verdict-banner"
+                  aria-label={`Risk Controller Verdict: ${verdict}`}
+                  className={`rounded-xl border p-5 ${bannerStyles}`}
+                >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-white/10 pb-4 mb-4">
                     <div className="flex items-center gap-3">
                       <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
                         {isPTJActive && ptjMaster ? (
                           renderMasterAvatar(ptjMaster, 'sm')
                         ) : (
-                          <Icon className="h-6 w-6" />
+                          <Icon className="h-6 w-6" aria-hidden="true" />
                         )}
                       </div>
                       <div>
@@ -1697,13 +1730,14 @@ export const AgentCommitteeCard: React.FC<AgentCommitteeCardProps> = ({
                               : 'Committee Advisory Verdict (No PTJ Veto)'}
                           </span>
                           <span
+                            data-testid="verdict-badge"
                             className={`rounded-full px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide ${
                               isApproved
                                 ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/30'
                                 : 'bg-rose-500/20 text-rose-300 ring-1 ring-rose-500/30'
                             }`}
                           >
-                            {verdict}
+                            {isApproved ? 'APPROVED' : verdict === 'VETOED' ? 'BLOCKED / VETOED' : verdict}
                           </span>
                         </div>
                         <h3 className="text-base font-bold text-white mt-0.5">

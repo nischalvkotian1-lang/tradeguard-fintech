@@ -1,3 +1,9 @@
+import {
+  calculateGrahamNumber,
+  calculateMarginOfSafety,
+  checkGrahamMultiplier,
+} from '../utils/riskMath';
+
 export interface StockMetrics {
   symbol: string;
   companyName: string;
@@ -43,21 +49,16 @@ export function evaluateGrahamMetrics(metrics: StockMetrics): {
 } {
   const { currentPrice, pe, pb, eps, bookValue, debtToEquity, currentRatio } = metrics;
 
-  // Graham Number Formula: sqrt(22.5 * max(0, EPS) * max(0, BVPS))
-  const validEPS = Math.max(0, eps || 0);
-  const validBV = Math.max(0, bookValue || 0);
-  const grahamNumber = Number(Math.sqrt(22.5 * validEPS * validBV).toFixed(2));
+  // Graham Number Formula via riskMath: sqrt(22.5 * max(0, EPS) * max(0, BVPS))
+  const grahamNumber = calculateGrahamNumber(eps, bookValue);
 
-  // Margin of Safety % vs Current Market Price
-  const marginOfSafetyPct =
-    grahamNumber > 0
-      ? Number((((grahamNumber - currentPrice) / grahamNumber) * 100).toFixed(1))
-      : -100;
+  // Margin of Safety % vs Current Market Price via riskMath
+  const marginOfSafetyPct = calculateMarginOfSafety(currentPrice, grahamNumber);
 
   // 5 Fundamental Graham Checklist Rules
   const peCheck = pe > 0 && pe <= 20;
   const pbCheck = pb > 0 && pb <= 2.5;
-  const grahamMultiplierCheck = pe > 0 && pb > 0 && pe * pb <= 22.5;
+  const grahamMultiplierCheck = checkGrahamMultiplier(pe, pb);
   const debtCheck = debtToEquity <= 1.0;
   const liquidityCheck = (currentRatio || 1.5) >= 1.2;
 

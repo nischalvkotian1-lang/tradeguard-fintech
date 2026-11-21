@@ -335,12 +335,12 @@ export function normalizeTradeParams(
   metrics: NormalizedMetrics
 ): NormalizedTradeParams {
   const currentPrice = metrics.currentPrice;
-  const budget = riskPlan?.budget > 0 ? riskPlan.budget : 50000;
+  const budget = riskPlan != null && Number.isFinite(riskPlan.budget) ? riskPlan.budget : 50000;
 
   const rawShares = riskPlan?.recommendedShares;
   const wholeShares =
-    rawShares != null && rawShares > 0
-      ? rawShares
+    riskPlan != null
+      ? (rawShares ?? 0)
       : Math.floor(budget / currentPrice);
 
   const rawStop = riskPlan?.plannedStopLossPrice;

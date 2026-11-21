@@ -1,4 +1,5 @@
 import { StockMetrics } from './benjaminGraham';
+import { checkBuffettRoe, checkBuffettOperatingMargin } from '../utils/riskMath';
 
 export interface BuffettAnalysisResult {
   agentId: 'buffett';
@@ -34,9 +35,9 @@ export function evaluateBuffettMetrics(
   const roe = metrics.roe ?? 16.5; // Fallback to estimated ROE if unpopulated
   const operatingMargin = metrics.operatingMargin ?? 18.0;
 
-  // 1. Five Fundamental Buffett Quality & Moat Checks
-  const roeCheck = roe >= 15.0;
-  const operatingMarginCheck = operatingMargin >= 14.0;
+  // 1. Five Fundamental Buffett Quality & Moat Checks via riskMath
+  const roeCheck = checkBuffettRoe(roe);
+  const operatingMarginCheck = checkBuffettOperatingMargin(operatingMargin);
   const conservativeDebtCheck = debtToEquity <= 0.8;
   const fcfPositiveCheck = debtToEquity < 1.2; // proxy for cash-generative stability
   const valuationSanityCheck = pe > 0 && pe <= 32.0;

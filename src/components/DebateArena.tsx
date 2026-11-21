@@ -27,7 +27,7 @@ import {
   DebateMode,
   DebateStreamStatus,
 } from '../services/debateSimulator';
-import { MasterId } from '../types/agents';
+import { MasterId, getMasterPillarAlt } from '../types/agents';
 
 export interface DebateArenaProps {
   messages: DebateMessage[];
@@ -331,7 +331,7 @@ export const DebateArena: React.FC<DebateArenaProps> = ({
             >
               <img
                 src={profile.avatarUrl}
-                alt={profile.name}
+                alt={getMasterPillarAlt(profile.id)}
                 className={`h-5 w-5 rounded-full object-cover border ${profile.borderColor} ${
                   isSpeakingNow ? 'animate-pulse' : ''
                 }`}
@@ -393,7 +393,7 @@ export const DebateArena: React.FC<DebateArenaProps> = ({
                   <div className="relative shrink-0 mt-0.5">
                     <img
                       src={msg.avatarUrl}
-                      alt={msg.speakerName}
+                      alt={getMasterPillarAlt(msg.speakerId)}
                       className={`h-11 w-11 rounded-full object-cover border-2 shadow-md ${msg.borderColor}`}
                     />
                     <span

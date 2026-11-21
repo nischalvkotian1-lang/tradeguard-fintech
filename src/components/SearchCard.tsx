@@ -31,6 +31,10 @@ function formatMoney(value: number, currency = '₹') {
   return `${currency}${formatted}`;
 }
 
+/**
+ * SearchCard component provides an accessible, sanitized search interface
+ * for finding and selecting NSE-listed equity tickers with live/cached quote feedback.
+ */
 export const SearchCard: React.FC<SearchCardProps> = ({
   symbol,
   setSymbol,
@@ -85,11 +89,16 @@ export const SearchCard: React.FC<SearchCardProps> = ({
     }
   };
 
+  /**
+   * Sanitizes input: permits only alphanumeric characters, hyphen, dot, and ampersand.
+   * Enforces a maximum length of 15 characters and auto-uppercases.
+   */
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    setQuery(val);
-    setSymbol(val);
-    setIsOpen(val.trim().length > 0);
+    const raw = e.target.value;
+    const sanitized = raw.replace(/[^A-Za-z0-9&.\-\s]/g, '').slice(0, 15).toUpperCase();
+    setQuery(sanitized);
+    setSymbol(sanitized.trim());
+    setIsOpen(sanitized.trim().length > 0);
     setHighlightedIndex(-1);
   };
 
@@ -148,24 +157,27 @@ export const SearchCard: React.FC<SearchCardProps> = ({
       {/* Header Label */}
       <div className="mb-4 flex items-center gap-2.5">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 ring-1 ring-white/10">
-          <Search className="h-4 w-4 text-cyan-300" />
+          <Search className="h-4 w-4 text-cyan-300" aria-hidden="true" />
         </div>
         <div>
           <h2 className="text-sm font-semibold text-white">Step 1: Stock Setup</h2>
-          <p className="text-[11px] text-slate-500">Search NSE symbol or company name</p>
+          <p id="ticker-search-helper" className="text-[11px] text-slate-400">
+            Search NSE symbol or company name
+          </p>
         </div>
       </div>
 
       <div className="space-y-4">
         {/* Autocomplete Search Input */}
         <div ref={containerRef} className="relative z-40">
-          <label className="mb-1.5 block text-xs font-medium text-slate-400">
+          <label htmlFor="ticker-search-input" className="mb-1.5 block text-xs font-medium text-slate-300">
             <span>NSE Stock Symbol</span>
           </label>
 
           <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden="true" />
             <input
+              id="ticker-search-input"
               ref={inputRef}
               value={query}
               onChange={handleInputChange}
@@ -178,17 +190,23 @@ export const SearchCard: React.FC<SearchCardProps> = ({
               placeholder="e.g. TATAMOTORS, RELIANCE, INFY..."
               autoComplete="off"
               spellCheck="false"
-              className="w-full rounded-lg border border-white/10 bg-navy-850 py-2.5 pl-10 pr-9 font-mono text-sm font-semibold uppercase tracking-wider text-white placeholder:font-sans placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-600 focus:border-cyan-400/60 focus:outline-none focus:ring-2 focus:ring-cyan-400/20 transition-all"
+              aria-label="Search NSE Stock Symbol"
+              aria-describedby="ticker-search-helper"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={isOpen}
+              className="w-full rounded-lg border border-white/10 bg-navy-850 py-2.5 pl-10 pr-9 font-mono text-sm font-semibold uppercase tracking-wider text-white placeholder:font-sans placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus:border-cyan-400/60 transition-all"
             />
 
             {query.length > 0 && (
               <button
                 type="button"
                 onClick={handleClear}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-slate-500 transition hover:bg-white/10 hover:text-slate-300"
+                aria-label="Clear stock search input"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 transition hover:bg-white/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                 title="Clear input"
               >
-                <X className="h-3.5 w-3.5" />
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             )}
           </div>
